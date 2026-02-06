@@ -22,6 +22,8 @@ class OrderState(BaseModel):
     order_lines: List[OrderLine] = Field(default_factory=lambda: [OrderLine()])
     is_complete: bool = False
     missing_fields: List[str] = Field(default_factory=list)
+    order_status: str = "new"  # new | in_progress | completed | cancelled
+
     
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON storage"""
@@ -54,7 +56,19 @@ class OrderState(BaseModel):
                 missing.append(f"order_lines[{idx}].quantity")
             if not line.unit:
                 missing.append(f"order_lines[{idx}].unit")
-        
+
+        if len(missing) == 0 and len(self.order_lines) > 0:
+            self.is_complete = True
+            if self.order_status == "new" or self.order_status == "in_progress":
+                self.order_status = "in_progress"  # Ready for confirmation
+        elif len(self.order_lines) > 0 or self.customer_name or self.customer_company:
+            # Has some data → in_progress
+            if self.order_status == "new":
+                self.order_status = "in_progress"
+        else:
+            # No data yet → remains new
+            self.order_status = "new"
+                
         self.missing_fields = missing
         self.is_complete = len(missing) == 0
         

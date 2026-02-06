@@ -25,7 +25,7 @@ def start_terminal_chat():
     orchestrator = Orchestrator()
 
     # Simulate phone number (in real WhatsApp integration, this comes from webhook)
-    phone_number = "+6285210324533336"
+    phone_number = "+6285764285555"
     conversation_id, welcome_message = orchestrator.start_conversation(phone_number)
     
     print(f"Conversation ID: {conversation_id}")
@@ -33,7 +33,7 @@ def start_terminal_chat():
     print("[2/2] Orchestrator ready.")
     print("\n--- CHAT STARTED (Type 'exit' to quit) ---")
     print()
-    print(welcome_message)
+    print("bot: ", welcome_message)
     while True:
         try:
             user_text = input("\nYou: ").strip()
@@ -51,7 +51,6 @@ def start_terminal_chat():
                 break
 
             response = orchestrator.handle_message(user_text)
-            orchestrator.debug_cache()
             print(f"Bot: {response}")
 
         except KeyboardInterrupt:

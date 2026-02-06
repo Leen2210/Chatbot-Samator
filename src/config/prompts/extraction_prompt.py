@@ -26,6 +26,7 @@ ATURAN:
 - Jika tidak yakin, set field sebagai null
 - Delivery date bisa dalam bentuk natural language ("besok", "lusa"), jangan dikonversi
 - Quantity harus integer, bukan string
+- - Jika user memberikan nilai baru untuk field yang sudah ada di CURRENT ORDER STATE, gunakan nilai terbaru.
 
 FORMAT OUTPUT:
 Respond dengan JSON ONLY, tanpa markdown atau text lain:
@@ -42,12 +43,19 @@ Respond dengan JSON ONLY, tanpa markdown atau text lain:
   }
 }"""
 
-def build_extraction_user_prompt(user_message: str, current_order_state: dict) -> str:
+def build_extraction_user_prompt(user_message: str, current_order_state: dict, history: list = None) -> str:
     """Build user prompt with context"""
-    return f"""CURRENT ORDER STATE:
+    history_text = ""
+    if history:
+        # Format last 3-4 messages for context
+        history_text = "\n".join([f"{m['role']}: {m['content']}" for m in history[-4:]])
+    return f"""CONVERSATION HISTORY:
+{history_text}
+
+CURRENT ORDER STATE:
 {current_order_state}
 
 USER MESSAGE:
 "{user_message}"
 
-Klasifikasi intent dan ekstrak entities dalam format JSON."""
+Klasifikasi intent dan ekstrak entities."""

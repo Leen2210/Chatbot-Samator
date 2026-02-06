@@ -89,86 +89,111 @@ class Orchestrator:
             return conversation_id, welcome_message
     
     def handle_message(self, user_message: str) -> str:
-        """Handle incoming user message"""
+        """Handle incoming user message with Intent Trigger logic"""
+        context = self.conversation_manager.get_context(self.current_conversation_id)
+
+        # 1. Get current order state from Cache/DB
+        current_order_state = self.conversation_manager.get_order_state(self.current_conversation_id)
         
-        # 1. Store user message to DB
+        # 2. CALL INTENT CLASSIFIER (The Trigger)
+        # Identify user intent and extract entities based on current state
+        intent_result = self.intent_classifier.classify_and_extract(user_message, current_order_state)
+
+        # 3. Store user message with extracted entities for DB visibility
         self.conversation_manager.add_message(
             conversation_id=self.current_conversation_id,
             role='user',
-            content=user_message
+            content=user_message,
+            entities=intent_result.entities.model_dump()
         )
         
-        # 🆕 2. Handle resume response if waiting for it
+        # 4. Handle Special Flow: Resume incomplete order
         if self.awaiting_resume_response:
             response = self._handle_resume_response(user_message)
+            self.conversation_manager.add_message(
+                self.current_conversation_id, 'assistant', response
+            )
+            self.awaiting_resume_response = False
+            return response
+
+        # 5. STRICT REDIRECTION: If intent is not ORDER or CANCEL, redirect to Call Center
+        if intent_result.intent not in ["ORDER", "CANCEL_ORDER"]:
+            response = "Maaf, untuk bantuan atau pertanyaan tersebut silakan hubungi customer service kami di [Nomor Telepon]. Ada lagi yang bisa saya bantu terkait pemesanan?"
             
             self.conversation_manager.add_message(
                 conversation_id=self.current_conversation_id,
                 role='assistant',
                 content=response
             )
-            
-            self.awaiting_resume_response = False
             return response
-        
-        # 3. Get current order state
-        current_order_state = self.conversation_manager.get_order_state(self.current_conversation_id)
-        
-        # 🆕 4. Check if order is completed - block modifications
+
+        # 7. CANCELATION
+        if intent_result.intent == "CANCEL_ORDER":
+            # Check if the order is already completed
+            print(current_order_state.order_status)
+            if current_order_state.order_status == "completed":
+                response = "Maaf, untuk layanan ini akan saya teruskan ke pihak call center kami. mohon ditunggu sebentar, kami akan menghubungi anda kembali di nomor ini"
+                self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
+                return response
+
+            # Normal cancellation for in-progress orders
+            current_order_state.order_status = "cancelled"
+            self.conversation_manager.update_order_state(self.current_conversation_id, current_order_state)
+            self.conversation_manager.mark_order_complete(self.current_conversation_id)
+            
+            response = "Pesanan telah dibatalkan. Ada yang bisa saya bantu lagi?" # NEED KONFIRMASI!
+            self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
+            return response
+
+        # 8. PRE-GENERATION CHECK: Check for completed or confirmation status
         if current_order_state.order_status == "completed":
             context = self.conversation_manager.get_context(self.current_conversation_id)
             response = self._generate_response(current_order_state, user_message, context)
-            
-            self.conversation_manager.add_message(
-                conversation_id=self.current_conversation_id,
-                role='assistant',
-                content=response
-            )
-            
+            self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
             return response
-        
-        # 🆕 5. Handle order confirmation flow
+
         if self.awaiting_order_confirmation:
             response = self._handle_confirmation_response(user_message, current_order_state)
-            
-            self.conversation_manager.add_message(
-                conversation_id=self.current_conversation_id,
-                role='assistant',
-                content=response
-            )
-            
-            # awaiting_order_confirmation flag is cleared inside _handle_confirmation_response
+            self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
             return response
         
-        # 🆕 6. Check if order just became complete - show confirmation prompt
-        # Update order state first (in case LLM extracted new info)
+        # 8b. UPDATE ORDER STATE: Apply new data to the state object
+        if intent_result.intent == "ORDER" and intent_result.has_entities():
+            e = intent_result.entities
+            # Map fields to order_state
+            if e.customer_name: current_order_state.customer_name = e.customer_name
+            if e.customer_company: current_order_state.customer_company = e.customer_company
+            if e.delivery_date: current_order_state.delivery_date = e.delivery_date
+            
+            if len(current_order_state.order_lines) > 0:
+                line = current_order_state.order_lines[0]
+                if e.product_name: line.product_name = e.product_name
+                if e.quantity: line.quantity = e.quantity
+                if e.unit: line.unit = e.unit
+            
+            # This triggers the cache update
+            self.conversation_manager.update_order_state(
+                self.current_conversation_id, 
+                current_order_state
+            )
+
+        # 9. TRIGGER CONFIRMATION: If state just became complete
         current_order_state.update_missing_fields()
-        
         if current_order_state.is_complete and current_order_state.order_status == "in_progress":
-            # Order is complete - show confirmation prompt
             response = self._generate_confirmation_prompt(current_order_state)
-            self.awaiting_order_confirmation = True  # Set flag
-            
-            self.conversation_manager.add_message(
-                conversation_id=self.current_conversation_id,
-                role='assistant',
-                content=response
-            )
-            
+            self.awaiting_order_confirmation = True
+            self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
             return response
-        
-        # 7. Normal flow - order still in progress, need more info
+
+        # 10. NORMAL FLOW: Generate LLM response asking for missing fields
         context = self.conversation_manager.get_context(self.current_conversation_id)
         response = self._generate_response(current_order_state, user_message, context)
-        
-        # 🆕 8. Try to extract entities from user message and update order state
-        # (This is where you'd call entity extraction if you add it back later)
-        # For now, we rely on LLM to naturally guide the conversation
         
         self.conversation_manager.add_message(
             conversation_id=self.current_conversation_id,
             role='assistant',
-            content=response
+            content=response,
+            entities=intent_result.entities.model_dump()
         )
         
         return response
@@ -317,7 +342,6 @@ class Orchestrator:
     - "Batal" untuk membatalkan pesanan"""
         
         return confirmation
-    
 
     def _handle_confirmation_response(self, user_message: str, order_state: OrderState) -> str:
         """
@@ -389,7 +413,6 @@ class Orchestrator:
     - "Ubah [field]" untuk mengubah
     - "Batal" untuk membatalkan"""
 
-    def _detect_field_to_change(self, user_input: str) -> str:
         """
         Detect which field user wants to change
         

@@ -18,7 +18,7 @@ class IntentClassifier:
     def __init__(self):
         self.llm_service = llm_service
     
-    def classify_and_extract(self, user_message: str, current_order_state: OrderState) -> IntentResult:
+    def classify_and_extract(self, user_message: str, current_order_state: OrderState, history: list = None) -> IntentResult:
         """
         Single LLM call to classify intent and extract entities
         
@@ -32,7 +32,8 @@ class IntentClassifier:
         # Build the prompt
         user_prompt = build_extraction_user_prompt(
             user_message=user_message,
-            current_order_state=current_order_state.to_dict()
+            current_order_state=current_order_state.to_dict(), 
+            history=history
         )
         
         try:

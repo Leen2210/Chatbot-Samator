@@ -85,7 +85,7 @@ class IntentClassifier:
             intent = data.get("intent", "UNKNOWN").upper()
             
             # Validate intent
-            valid_intents = ["ORDER", "CANCEL_ORDER", "FALLBACK"]
+            valid_intents = ["ORDER", "CANCEL_ORDER", "CHIT_CHAT", "FALLBACK"]
             if intent not in valid_intents:
                 intent = "UNKNOWN"
             
@@ -126,19 +126,21 @@ class IntentClassifier:
     def _extract_intent_from_text(self, text: str) -> str:
         """
         Fallback: Try to extract intent from non-JSON text
-        
+
         Args:
             text: Raw text response
-        
+
         Returns:
-            Intent string (ORDER, CANCEL_ORDER, FALLBACK, or UNKNOWN)
+            Intent string (ORDER, CANCEL_ORDER, CHIT_CHAT, FALLBACK, or UNKNOWN)
         """
         text_lower = text.lower()
-        
+
         if any(word in text_lower for word in ["order", "pesan", "beli"]):
             return "ORDER"
         elif any(word in text_lower for word in ["cancel", "batal", "stop"]):
             return "CANCEL_ORDER"
+        elif any(word in text_lower for word in ["chit_chat", "courtesy", "greeting"]):
+            return "CHIT_CHAT"
         elif any(word in text_lower for word in ["fallback", "redirect", "other"]):
             return "FALLBACK"
         else:

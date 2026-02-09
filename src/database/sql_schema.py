@@ -20,23 +20,23 @@ class Customer(Base):
 
 class Order(Base):
     __tablename__ = "orders"
-    
+
     # Existing fields
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    customer_id = Column(Integer, ForeignKey('customers.id'), nullable=True)  # Optional FK
+    customer_id = Column(String(50), ForeignKey('customers.id'), nullable=True)  # Changed to String to match Customer.id
     status = Column(String, default="pending")
     items = Column(JSON)  # Keep this! Stores multiple items
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
+
     # NEW FIELDS - Add these
     order_id = Column(String, unique=True, index=True)  # User-friendly ID: ORD-20250206-0001
     conversation_id = Column(String, ForeignKey('conversations.id'), nullable=True)
-    
+
     # Denormalized customer data (for historical record)
     customer_name = Column(String, nullable=True)
     customer_company = Column(String, nullable=True)
     customer_phone = Column(String, nullable=True)
-    
+
     # Order details
     delivery_date = Column(String, nullable=True)  # "2025-02-10" or "besok"
     notes = Column(Text, nullable=True)

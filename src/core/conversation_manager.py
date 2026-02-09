@@ -232,10 +232,10 @@ class ConversationManager:
         conversation = self.sql_service.db.query(Conversation).filter_by(id=conversation_id).first()
         if conversation:
             conversation.order_state = order_dict
-            
+
             # 🆕 Sync order_status to separate column for fast queries
             conversation.order_status = order_state.order_status
-            
+
             conversation.updated_at = now_wib()
             self.sql_service.db.commit()
 
@@ -251,15 +251,83 @@ class ConversationManager:
                 order_state = OrderState.from_dict(conversation.order_state)
                 order_state.order_status = "completed"
                 conversation.order_state = order_state.to_dict()
-            
+
             # Update status column
             conversation.order_status = "completed"
-            conversation.status = "completed"  # Also mark conversation as completed
+            conversation.status = "active"  # Keep conversation active for new orders!
             conversation.updated_at = now_wib()
             self.sql_service.db.commit()
-            
-            # Clear from cache (completed orders don't need fast access)
+
+            # Clear from cache (will be reset for new order)
             self.cache_service.delete_order_state(conversation_id)
+
+    def reset_order_state(self, conversation_id: str):
+        """
+        Reset order state to allow new order in same conversation
+        Called after order is completed and saved
+
+        Args:
+            conversation_id: Conversation ID
+        """
+        conversation = self.sql_service.db.query(Conversation).filter_by(id=conversation_id).first()
+        if conversation:
+            # Create fresh order state
+            fresh_order_state = OrderState()
+            conversation.order_state = fresh_order_state.to_dict()
+            conversation.order_status = "new"
+            conversation.updated_at = now_wib()
+            self.sql_service.db.commit()
+
+            # Update cache with DICT, not object!
+            self.cache_service.set_order_state(conversation_id, fresh_order_state.to_dict())
+
+            print(f"✅ Order state reset for conversation {conversation_id}")
+
+    def get_phone_number(self, conversation_id: str) -> str:
+        """
+        Get phone number for a conversation
+
+        Args:
+            conversation_id: Conversation ID
+
+        Returns:
+            Phone number
+        """
+        conversation = self.sql_service.db.query(Conversation).filter_by(id=conversation_id).first()
+        if conversation:
+            return conversation.phone_number
+        return None
+
+    def get_previous_orders(self, conversation_id: str) -> list:
+        """
+        Get previous completed orders for this conversation
+        Used to auto-fill customer data for new orders
+
+        Args:
+            conversation_id: Conversation ID
+
+        Returns:
+            List of order dicts sorted by created_at DESC
+        """
+        from src.database.sql_schema import Order
+
+        try:
+            orders = self.sql_service.db.query(Order).filter(
+                Order.conversation_id == conversation_id,
+                Order.status == "confirmed"
+            ).order_by(Order.created_at.desc()).all()
+
+            return [
+                {
+                    'customer_name': order.customer_name,
+                    'customer_company': order.customer_company,
+                    'customer_phone': order.customer_phone
+                }
+                for order in orders
+            ]
+        except Exception as e:
+            print(f"⚠️ Error fetching previous orders: {e}")
+            return []
 
 # Singleton
 conversation_manager = ConversationManager()

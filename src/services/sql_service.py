@@ -2,10 +2,8 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from src.config.settings import settings
-from src.database.sql_schema import Base
+from src.database.sql_schema import Base, Customer, Parts, Order
 from src.services.cache_service import cache_store
-
-from database.sql_schema import Customer, Parts, Order
 # 1. Create Engine
 engine = create_engine(settings.DATABASE_URL)
 

@@ -6,6 +6,7 @@ from datetime import date
 
 class OrderLine(BaseModel):
     """Single item in the order"""
+    partnum: Optional[str] = None  # Part number from database (e.g., BULIN0010000000)
     product_name: Optional[str] = None
     quantity: Optional[int] = None
     unit: Optional[str] = None  # btl, tabung, m3, etc.

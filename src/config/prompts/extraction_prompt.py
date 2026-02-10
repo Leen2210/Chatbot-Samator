@@ -25,14 +25,26 @@ ENTITIES YANG HARUS DIEKSTRAK (jika ada):
 - product_name: Nama produk (contoh: "oksigen UHP", "nitrogen", "argon")
 - quantity: Jumlah dalam angka (contoh: 5, 10, 20)
 - unit: Satuan (contoh: "tabung", "botol", "btl", "m3", "liter")
-- customer_name: Nama customer (contoh: "Anton", "Budi Santoso")
-- customer_company: Nama perusahaan (contoh: "PT Maju Jaya", "CV Sejahtera")
+- customer_name: Nama INDIVIDU/PERSON (contoh: "Anton", "Budi Santoso", "Jessica Chandra")
+- customer_company: Nama ORGANISASI/INSTITUSI (bisa PT, CV, UD, Rumah Sakit, Yayasan, Koperasi, dll)
+  * Contoh PT/CV: "PT Maju Jaya", "CV Sejahtera", "CV Surya Dadi"
+  * Contoh Rumah Sakit: "RS Siloam", "RSUD Jakarta", "Rumah Sakit Harapan"
+  * Contoh Yayasan: "Yayasan Pendidikan", "Yayasan Kesehatan"
+  * Contoh Lainnya: "UD Maju", "Koperasi Sejahtera", "Firma Dagang", "Toko Berkah"
+  * PENTING: Jika user hanya sebut nama person tanpa organisasi → set customer_company = null
+  * PENTING: Jika user sebut organisasi/institusi → masukkan ke customer_company (apapun jenisnya)
 - delivery_date: Tanggal kirim dalam format YYYY-MM-DD (contoh: "2026-02-10")
 - cancellation_reason: Alasan cancel (hanya jika intent=CANCEL_ORDER)
 
 ATURAN:
 - Jika user menyebut angka tanpa context, coba infer dari percakapan sebelumnya
 - Jika tidak yakin, set field sebagai null
+- **PENTING - Customer Name vs Company**:
+  * Jika user bilang "Jessica" atau "Budi Santoso" → customer_name = "Jessica"/"Budi Santoso", customer_company = null
+  * Jika user bilang "PT ABC" atau "RS Siloam" → customer_company = "PT ABC"/"RS Siloam", customer_name tetap dari sebelumnya
+  * Jika user bilang "Jessica dari PT ABC" → customer_name = "Jessica", customer_company = "PT ABC"
+  * Jika user bilang "Rumah Sakit Siloam" → customer_company = "Rumah Sakit Siloam" (bukan customer_name)
+  * Jika user bilang "Toko Berkah" → customer_company = "Toko Berkah" (bukan customer_name)
 - **PENTING**: Untuk delivery_date, konversi natural language ke format YYYY-MM-DD:
   * Gunakan CURRENT_DATE sebagai referensi
   * "besok" = CURRENT_DATE + 1 hari

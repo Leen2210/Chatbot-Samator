@@ -7,6 +7,7 @@ from src.core.conversation_manager import conversation_manager
 from src.core.intent_classifier import intent_classifier
 from src.models.order_state import OrderState, OrderLine
 from src.database.sql_schema import Parts
+from src.utils.language_detector import language_detector
 from src.config.prompts.dialog_prompts import (
     WELCOME_TEMPLATE,
     ORDER_GREETING,
@@ -27,6 +28,7 @@ class Orchestrator:
 
         self.current_conversation_id = None
         self.intent_selected = False  # Track if user has selected intent
+        self.current_language = 'id'  # Track conversation language (default Indonesian)
 
         self.awaiting_resume_response = False  # 🆕 Track if waiting for resume answer
         self.awaiting_order_confirmation = False  # 🆕 Track if waiting for order confirmation
@@ -92,6 +94,24 @@ class Orchestrator:
 
     def handle_message(self, user_message: str) -> str:
         """Handle incoming user message with Intent Trigger logic"""
+        # Detect language from user input
+        detected_lang = language_detector.detect(user_message)
+        
+        # Lock language after first detection (unless user explicitly asks to switch)
+        if self.current_language == 'id' and detected_lang == 'en':
+            # Check if user is explicitly asking to switch to English
+            user_lower = user_message.lower()
+            if any(phrase in user_lower for phrase in ['speak english', 'talk in english', 'use english', 'english please', 'can we just talk in english']):
+                self.current_language = 'en'
+        elif self.current_language == 'en' and detected_lang == 'id':
+            # Check if user is explicitly asking to switch to Indonesian
+            user_lower = user_message.lower()
+            if any(phrase in user_lower for phrase in ['bahasa indonesia', 'pakai bahasa indonesia', 'bicara bahasa indonesia']):
+                self.current_language = 'id'
+        else:
+            # First message or same language - update
+            self.current_language = detected_lang
+        
         context = self.conversation_manager.get_context(self.current_conversation_id)
 
         # 1. Get current order state from Cache/DB
@@ -134,7 +154,40 @@ class Orchestrator:
             # Use LLM to generate natural response
             context = self.conversation_manager.get_context(self.current_conversation_id)
 
-            system_prompt = """Anda adalah customer service call center profesional di Indonesia.
+            if self.current_language == 'en':
+                system_prompt = """You are a professional call center customer service representative in Indonesia.
+
+TASK:
+Respond naturally and friendly to chit chat or courtesy messages from customers.
+
+STYLE:
+- Natural, friendly, and professional
+- Brief (1-2 sentences maximum)
+- Use polite English
+
+RULES:
+- If customer says "thank you" → respond with "You're welcome! Is there anything else I can help you with?"
+- If customer says "good morning/afternoon/evening" → return greeting and ask "How can I help you?"
+- If customer says "okay/alright/sure" → respond "Alright, thank you"
+- If customer says "nothing else/that's all" → respond "Thank you! Don't hesitate to contact us again if you need anything. Have a great day!"
+- If customer says "wait/hold on" → respond "Sure, I'll wait"
+- Stay professional and not too casual
+
+EXAMPLES:
+User: "thank you"
+Bot: "You're welcome! Is there anything else I can help you with?"
+
+User: "good afternoon"
+Bot: "Good afternoon! How can I help you today?"
+
+User: "okay sure"
+Bot: "Alright, thank you. Please let me know if you need anything."
+
+User: "nothing else, thanks"
+Bot: "Thank you for contacting us! Don't hesitate to chat again if you need anything. Have a great day!"
+"""
+            else:
+                system_prompt = """Anda adalah customer service call center profesional di Indonesia.
 
 TUGAS:
 Respond secara natural dan ramah terhadap chit chat atau courtesy message dari customer.
@@ -181,7 +234,18 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
 
         # 6. STRICT REDIRECTION: If intent is not ORDER or CANCEL, redirect to Call Center
         if intent_result.intent not in ["ORDER", "CANCEL_ORDER"]:
-            response = "Maaf, untuk bantuan atau pertanyaan tersebut silakan hubungi customer service kami di [Nomor Telepon]. Ada lagi yang bisa saya bantu terkait pemesanan?"
+            # Check if user is asking to switch language
+            user_lower = user_message.lower()
+            if any(phrase in user_lower for phrase in ['speak english', 'talk in english', 'use english', 'english please', 'can we just talk in english']):
+                self.current_language = 'en'
+                response = "Of course! I'll continue in English. How can I help you with your order?"
+            elif any(phrase in user_lower for phrase in ['bahasa indonesia', 'pakai bahasa indonesia', 'bicara bahasa indonesia']):
+                self.current_language = 'id'
+                response = "Tentu! Saya akan lanjutkan dalam Bahasa Indonesia. Ada yang bisa saya bantu dengan pesanan Anda?"
+            elif self.current_language == 'en':
+                response = "Sorry, for that assistance or question, please contact our customer service at [Phone Number]. Is there anything else I can help you with regarding orders?"
+            else:
+                response = "Maaf, untuk bantuan atau pertanyaan tersebut silakan hubungi customer service kami di [Nomor Telepon]. Ada lagi yang bisa saya bantu terkait pemesanan?"
 
             self.conversation_manager.add_message(
                 conversation_id=self.current_conversation_id,
@@ -192,27 +256,36 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
 
         # 7. CANCELATION
         if intent_result.intent == "CANCEL_ORDER":
-            # 🔍 Check if there are any completed orders in database
+            # Check if there are any completed orders in database
             previous_orders = self.conversation_manager.get_previous_orders(self.current_conversation_id)
 
             # If user has completed orders, they can't cancel via chatbot
             if previous_orders and len(previous_orders) > 0:
-                response = "Maaf, untuk layanan ini akan saya teruskan ke pihak call center kami. mohon ditunggu sebentar, kami akan menghubungi anda kembali di nomor ini"
+                if self.current_language == 'en':
+                    response = "Sorry, for this service we will forward it to our call center. Please wait a moment, we will contact you back at this number"
+                else:
+                    response = "Maaf, untuk layanan ini akan saya teruskan ke pihak call center kami. mohon ditunggu sebentar, kami akan menghubungi anda kembali di nomor ini"
                 self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
                 return response
 
             # Check if current order is in progress
             elif current_order_state.order_status == "in_progress":
-                # 🗑️ Reset order state (buang pesanan yang dibatalkan)
+                # Reset order state (buang pesanan yang dibatalkan)
                 self.conversation_manager.reset_order_state(self.current_conversation_id)
 
-                response = "Pesanan telah dibatalkan. Ada yang bisa saya bantu lagi?"
+                if self.current_language == 'en':
+                    response = "Order has been cancelled. Is there anything else I can help you with?"
+                else:
+                    response = "Pesanan telah dibatalkan. Ada yang bisa saya bantu lagi?"
                 self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
                 return response
 
             else:
                 # No active order to cancel
-                response = "Tidak ada pesanan aktif yang bisa dibatalkan. Ada yang bisa saya bantu?"
+                if self.current_language == 'en':
+                    response = "There is no active order to cancel. Is there anything I can help you with?"
+                else:
+                    response = "Tidak ada pesanan aktif yang bisa dibatalkan. Ada yang bisa saya bantu?"
                 self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
                 return response
 
@@ -347,12 +420,30 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
         Generate LLM response with order state context
         """
 
-        # 🆕 Check if dealing with completed order
+        # Check if dealing with completed order
         is_completed = order_state.order_status == "completed"
 
-        # 🆕 Build different system prompts based on order status
+        # Build different system prompts based on order status and language
         if is_completed:
-            system_prompt = f"""Anda adalah customer service call center profesional di Indonesia.
+            if self.current_language == 'en':
+                system_prompt = f"""You are a professional call center customer service representative in Indonesia.
+
+        IMPORTANT - ORDER ALREADY COMPLETED:
+        - This customer's order is already COMPLETED and cannot be modified
+        - You can ONLY provide information about previous orders
+        - If customer wants to modify/cancel order, direct them to customer service
+        - If customer wants to order again, offer to create a NEW order
+
+        PREVIOUS ORDER INFORMATION (COMPLETED):
+        {json.dumps(order_state.to_dict(), indent=2, ensure_ascii=False)}
+
+        RULES:
+        - Answer questions about previous orders politely
+        - If asked to modify/cancel: "Sorry, completed orders cannot be modified. For further assistance, please contact our customer service at [number]. Would you like to create a new order?"
+        - Maximum 2-3 sentences per response
+        """
+            else:
+                system_prompt = f"""Anda adalah customer service call center profesional di Indonesia.
 
         PENTING - PESANAN SUDAH SELESAI:
         - Pesanan customer ini sudah COMPLETED dan tidak bisa diubah
@@ -371,12 +462,45 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
 
         elif order_state.is_complete and order_state.order_status == "in_progress":
             # Generate confirmation prompt instead of asking LLM
-            # 🔥 IMPORTANT: Set flag to await confirmation
+            # IMPORTANT: Set flag to await confirmation
             self.awaiting_order_confirmation = True
             return self._generate_confirmation_prompt(order_state)
 
         else:
-            system_prompt = f"""Anda adalah customer service call center profesional di Indonesia yang sedang membantu pelanggan memesan produk industrial (gas, parts, dll).
+            if self.current_language == 'en':
+                system_prompt = f"""You are a professional call center customer service representative in Indonesia helping customers order industrial products (gas, parts, etc.).
+
+    SPEAKING STYLE:
+    - Use natural English as if speaking directly with the customer
+    - Friendly, polite, and professional but not stiff
+    - Use "you" or "Sir/Madam"
+    - Vary responses, don't be monotonous
+
+    YOUR TASK:
+    - Help customers complete order information
+    - Ask for missing information naturally
+    - Answer customer questions politely
+    - Ensure you get: product, quantity, unit, delivery date, customer name, and company/organization name
+
+    IMPORTANT - HOW TO ASK FOR COMPANY NAME:
+    - Don't just ask "company name"
+    - Ask flexibly: "May I have your full name?" (if no customer_name yet)
+    - Ask: "What's the company or organization name?" (if have customer_name but no customer_company)
+    - Accept all types: PT, CV, UD, Hospital, Foundation, Cooperative, Store, or individual names
+    - If customer gives person name only (e.g., "Jessica"), that's OK for customer_name
+    - If customer gives organization (e.g., "Siloam Hospital", "Berkah Store"), that's for customer_company
+
+    CURRENT ORDER INFORMATION:
+    {json.dumps(order_state.to_dict(), indent=2, ensure_ascii=False)}
+
+    RULES:
+    - If customer asks a question, answer it first before continuing
+    - Ask for missing/null information one by one
+    - If all information is complete, confirm the order
+    - Maximum 2-3 sentences per response
+    """
+            else:
+                system_prompt = f"""Anda adalah customer service call center profesional di Indonesia yang sedang membantu pelanggan memesan produk industrial (gas, parts, dll).
 
     GAYA BICARA:
     - Gunakan Bahasa Indonesia yang natural seperti berbicara langsung dengan pelanggan
@@ -388,7 +512,15 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
     - Bantu pelanggan melengkapi informasi pesanan
     - Tanyakan informasi yang masih kurang secara natural
     - Jawab pertanyaan pelanggan dengan ramah
-    - Pastikan mendapatkan: produk, jumlah, satuan, tanggal kirim, nama customer, dan perusahaan
+    - Pastikan mendapatkan: produk, jumlah, satuan, tanggal kirim, nama customer, dan nama perusahaan/organisasi
+
+    PENTING - CARA TANYA NAMA PERUSAHAAN:
+    - Jangan hanya tanya "nama perusahaan"
+    - Tanya dengan fleksibel: "Untuk nama lengkap Bapak/Ibu?" (jika belum ada customer_name)
+    - Tanya: "Nama perusahaan atau organisasinya?" (jika sudah ada customer_name tapi belum ada customer_company)
+    - Terima semua jenis: PT, CV, UD, Rumah Sakit, Yayasan, Koperasi, Toko, atau nama individu
+    - Jika customer bilang nama person saja (misal "Jessica"), itu OK untuk customer_name
+    - Jika customer bilang organisasi (misal "RS Siloam", "Toko Berkah"), itu untuk customer_company
 
     INFORMASI PESANAN SAAT INI:
     {json.dumps(order_state.to_dict(), indent=2, ensure_ascii=False)}
@@ -445,7 +577,25 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
         # Generate confirmation message
         order_line = order_state.order_lines[0]
 
-        confirmation = f"""✅ PESANAN BERHASIL DIKONFIRMASI!
+        if self.current_language == 'en':
+            confirmation = f"""✅ ORDER SUCCESSFULLY CONFIRMED!
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    Order Number: {order_id}
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    Product     : {order_line.product_name}
+    Quantity    : {order_line.quantity} {order_line.unit}
+    Date        : {order_state.delivery_date}
+    Customer    : {order_state.customer_name}
+    Company     : {order_state.customer_company}
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    Thank you! Your order is being processed.
+    You will receive updates via WhatsApp.
+
+    Is there anything else I can help you with?"""
+        else:
+            confirmation = f"""✅ PESANAN BERHASIL DIKONFIRMASI!
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     Nomor Pesanan: {order_id}
@@ -568,6 +718,25 @@ Ketik:
 - "Ubah [field]" untuk mengubah (contoh: "Ubah tanggal")
 - "Batal" untuk membatalkan pesanan"""
 
+        if self.current_language == 'en':
+            confirmation = f"""Alright, let me confirm your order:
+
+📦 ORDER DETAILS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Product     : {product_info}
+Quantity    : {order_line.quantity} {order_line.unit}
+Name        : {order_state.customer_name}
+Company     : {order_state.customer_company}
+Date        : {order_state.delivery_date}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Is the information correct to process?
+
+Type:
+- "Yes" / "Correct" to confirm order
+- "Change [field]" to modify (example: "Change date")
+- "Cancel" to cancel order"""
+
         return confirmation
 
     def _handle_confirmation_response(self, user_message: str, order_state: OrderState) -> str:
@@ -592,17 +761,20 @@ Ketik:
             self.awaiting_order_confirmation = False
             return response
 
-        # 🆕 Option 2: User wants to cancel (Batal)
+        # Option 2: User wants to cancel (Batal)
         elif any(word in user_input for word in ['batal', 'cancel', 'stop', 'gak jadi', 'tidak jadi']):
-            # 🗑️ Reset order state (buang pesanan yang dibatalkan)
+            # Reset order state (buang pesanan yang dibatalkan)
             self.conversation_manager.reset_order_state(self.current_conversation_id)
 
             self.awaiting_order_confirmation = False
 
-            return "Pesanan dibatalkan. Terima kasih. Ada yang bisa saya bantu lagi?"
+            if self.current_language == 'en':
+                return "Order cancelled. Thank you. Is there anything else I can help you with?"
+            else:
+                return "Pesanan dibatalkan. Terima kasih. Ada yang bisa saya bantu lagi?"
 
-        # 🆕 Option 3: User wants to edit (Ubah/Ganti/Edit)
-        elif 'ubah' in user_input or 'edit' in user_input or 'ganti' in user_input or 'salah' in user_input:
+        # Option 3: User wants to edit (Ubah/Ganti/Edit)
+        elif 'ubah' in user_input or 'edit' in user_input or 'ganti' in user_input or 'salah' in user_input or 'change' in user_input or 'modify' in user_input:
             # 🔥 NEW: Use LLM to extract changes from natural language
             changes_result = self._extract_order_changes(user_message, order_state)
 
@@ -627,14 +799,29 @@ Ketik:
                     self.awaiting_order_confirmation = True
                     return self._generate_confirmation_prompt(order_state)
                 else:
-                    return "Maaf, saya tidak bisa memahami perubahan yang Anda inginkan. Bisa dijelaskan lebih detail?"
+                    if self.current_language == 'en':
+                        return "Sorry, I couldn't understand the changes you want. Could you explain in more detail?"
+                    else:
+                        return "Maaf, saya tidak bisa memahami perubahan yang Anda inginkan. Bisa dijelaskan lebih detail?"
             else:
                 # No clear changes detected - ask for clarification
-                return "Baik, field apa yang ingin diubah? (contoh: 'ubah tanggal jadi besok', 'ganti perusahaan jadi CV ABC')"
+                if self.current_language == 'en':
+                    return "Alright, which field would you like to change? (example: 'change date to tomorrow', 'change company to CV ABC')"
+                else:
+                    return "Baik, field apa yang ingin diubah? (contoh: 'ubah tanggal jadi besok', 'ganti perusahaan jadi CV ABC')"
 
-        # 🆕 Option 4: Unclear response - ask again
+        # Option 4: Unclear response - ask again
         else:
-            return """Maaf, saya kurang mengerti.
+            if self.current_language == 'en':
+                return """Sorry, I don't quite understand.
+
+Is the order information correct?
+Type:
+- "Yes" to confirm
+- "Change [field] to [value]" to modify
+- "Cancel" to cancel"""
+            else:
+                return """Maaf, saya kurang mengerti.
 
 Apakah data pesanan sudah benar?
 Ketik:

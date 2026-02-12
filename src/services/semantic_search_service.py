@@ -49,7 +49,7 @@ class SemanticSearchService:
     
     def search_part_by_description(self, query: str, top_k: int = 3, threshold: float = 0.5) -> List[Dict]:
         """
-        Search parts using semantic similarity with keyword boosting
+        Search parts using semantic similarity
         
         Args:
             query: User's product description (e.g., "oksigen cair", "nitrogen gas")
@@ -79,18 +79,15 @@ class SemanticSearchService:
             
             score = self._cosine_similarity(query_embedding, part['embedding'])
             
-            # Apply keyword boosting
-            boosted_score = self._apply_keyword_boost(query, part['description'], score)
-            
             # Only include if above threshold
-            if boosted_score >= threshold:
+            if score >= threshold:
                 similarities.append({
                     'id': part['id'],
                     'partnum': part['partnum'],
                     'description': part['description'],
                     'uom': part['uom'],
                     'uomdesc': part['uomdesc'],
-                    'similarity': float(boosted_score)
+                    'similarity': float(score)
                 })
         
         # 4. Sort by similarity (highest first)
@@ -120,13 +117,10 @@ class SemanticSearchService:
             return None
 
         try:
-            # Convert to uppercase to match database embeddings
-            text_upper = text.lower()
-            
             # Generate embedding using BGE-M3
             # Note: BGE-M3 produces 1024-dimensional embeddings
             embedding = self._embedding_model.encode(
-                text_upper,
+                text,
                 normalize_embeddings=True  # Normalize for cosine similarity
             )
 
@@ -204,44 +198,6 @@ class SemanticSearchService:
             print(f"Error calculating similarity: {e}")
             return 0.0
     
-    def _apply_keyword_boost(self, query: str, description: str, base_score: float) -> float:
-        """
-        Apply keyword boosting for important product names
-        
-        Args:
-            query: User query
-            description: Product description
-            base_score: Base similarity score
-        
-        Returns:
-            Boosted score
-        """
-        # Define keyword mappings (query keyword -> product keywords)
-        keyword_map = {
-            'oksigen': ['o2', 'oksigen', 'oxygen'],
-            'nitrogen': ['n2', 'nitrogen'],
-            'argon': ['ar', 'argon'],
-            'hidrogen': ['h2', 'hidrogen', 'hydrogen'],
-            'co2': ['co2', 'carbon dioxide', 'karbon dioksida'],
-            'helium': ['he', 'helium'],
-            'asetilen': ['c2h2', 'asetilen', 'acetylene'],
-        }
-        
-        query_lower = query.lower()
-        desc_lower = description.lower()
-        
-        # Check if any keyword in query matches product
-        for query_keyword, product_keywords in keyword_map.items():
-            if query_keyword in query_lower:
-                # Check if matching product keyword exists in description
-                for product_keyword in product_keywords:
-                    if product_keyword in desc_lower:
-                        # Boost score by 15% if keyword matches
-                        return min(1.0, base_score * 1.15)
-        
-        # No keyword match - return base score
-        return base_score
-    
     def search_by_partnum(self, partnum: str) -> Optional[Dict]:
         """
         Search part by exact part number
@@ -305,4 +261,3 @@ class SemanticSearchService:
 
 # Singleton instance
 semantic_search_service = SemanticSearchService()
-

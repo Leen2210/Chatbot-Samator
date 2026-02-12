@@ -27,155 +27,88 @@ class Orchestrator:
         self.intent_classifier = intent_classifier
 
         self.current_conversation_id = None
-        self.intent_selected = False  # Track if user has selected intent
-        self.current_language = 'id'  # Track conversation language (default Indonesian)
+        self.intent_selected = False
+        self.current_language = 'id'
 
-        self.awaiting_resume_response = False  # Track if waiting for resume answer
-        self.awaiting_order_confirmation = False  # Track if waiting for order confirmation
+        self.awaiting_resume_response = False
+        self.awaiting_order_confirmation = False
+
+        # NEW: track human handoff state
+        # True = user has requested human handoff, cache is preserved
         self.awaiting_human_handoff = False
-
 
         # Warm up cache
         self.warm_up_cache()
 
     def start_conversation(self, phone_number: str) -> tuple[str, str]:
         """
-        Initialize conversation for a user
-        Detects incomplete orders and prompts to resume
+        Initialize conversation for a user.
+        Detects incomplete orders and prompts to resume.
 
         Returns:
             tuple: (conversation_id, welcome_message)
         """
-        # Get conversation with status info
         conversation_id, order_status, last_order_state = \
             self.conversation_manager.get_or_create_conversation(phone_number)
 
         self.current_conversation_id = conversation_id
-
-        # Get conversation context
         context = self.conversation_manager.get_context(conversation_id)
 
-        # CASE 1: Incomplete order detected - Prompt to resume
+        # CASE 1: Incomplete order detected — prompt to resume
         if order_status == "in_progress":
             welcome_message = self._generate_resume_prompt(last_order_state)
-
-            # Store the resume prompt
             self.conversation_manager.add_message(
                 conversation_id=conversation_id,
                 role='assistant',
                 content=welcome_message
             )
-
-            # Set flag to track resume mode
             self.awaiting_resume_response = True
-
             return conversation_id, welcome_message
 
         # CASE 2: New conversation or completed previous order
         if len(context) == 0:
-            # Brand new conversation
             welcome_message = "Halo! Saya Chatbot Asisten mu hari ini! Ada yang bisa saya bantu dengan pemesanan produk?"
-
             self.conversation_manager.add_message(
                 conversation_id=conversation_id,
                 role='assistant',
                 content=welcome_message
             )
-
             self.awaiting_resume_response = False
-
             return conversation_id, welcome_message
         else:
-            # Returning user with completed order
             welcome_message = "Selamat datang kembali! Ada yang bisa saya bantu hari ini?"
-
             self.awaiting_resume_response = False
-
             return conversation_id, welcome_message
 
     def handle_message(self, user_message: str) -> str:
         """Handle incoming user message with Intent Trigger logic"""
-        # Detect language from user input
+
+        # --- Language detection ---
         detected_lang = language_detector.detect(user_message)
-        
-        # Lock language after first detection (unless user explicitly asks to switch)
         if self.current_language == 'id' and detected_lang == 'en':
-            # Check if user is explicitly asking to switch to English
             user_lower = user_message.lower()
-            if any(phrase in user_lower for phrase in ['speak english', 'talk in english', 'use english', 'english please', 'can we just talk in english']):
+            if any(p in user_lower for p in ['speak english', 'talk in english', 'use english', 'english please', 'can we just talk in english']):
                 self.current_language = 'en'
         elif self.current_language == 'en' and detected_lang == 'id':
-            # Check if user is explicitly asking to switch to Indonesian
             user_lower = user_message.lower()
-            if any(phrase in user_lower for phrase in ['bahasa indonesia', 'pakai bahasa indonesia', 'bicara bahasa indonesia']):
+            if any(p in user_lower for p in ['bahasa indonesia', 'pakai bahasa indonesia', 'bicara bahasa indonesia']):
                 self.current_language = 'id'
         else:
-            # First message or same language - update
             self.current_language = detected_lang
-        
+
         context = self.conversation_manager.get_context(self.current_conversation_id)
 
-        # 1. Get current order state from Cache/DB
+        # 1. Get current order state
         current_order_state = self.conversation_manager.get_order_state(self.current_conversation_id)
 
-        # ---------------------------------------------------------------
-        # CRITICAL: Check handoff state BEFORE intent classification
-        # If handoff is active, only check for "balik ke bot" - ignore everything else
-        # ---------------------------------------------------------------
-        if self.awaiting_human_handoff:
-            user_lower = user_message.lower().strip()
-            
-            # Check if user wants to return to bot
-            cancel_keywords = ['balik ke bot', 'balik bot', 'kembali ke bot']
-            wants_to_cancel_handoff = any(keyword in user_lower for keyword in cancel_keywords)
-            
-            if wants_to_cancel_handoff:
-                # Cancel handoff and return to normal bot flow
-                self.awaiting_human_handoff = False
-                
-                # Store user message
-                self.conversation_manager.add_message(
-                    conversation_id=self.current_conversation_id,
-                    role='user',
-                    content=user_message
-                )
-                
-                response = (
-                    "Baik! Saya kembali. Semua informasi yang sudah Anda berikan masih tersimpan. "
-                    "Mari kita lanjutkan pesanan Anda. Ada yang bisa saya bantu?"
-                )
-                
-                self.conversation_manager.add_message(
-                    self.current_conversation_id, 'assistant', response
-                )
-                return response
-            else:
-                # User sent something other than "balik ke bot" during handoff
-                # Store the message but don't process it - just return waiting message
-                self.conversation_manager.add_message(
-                    conversation_id=self.current_conversation_id,
-                    role='user',
-                    content=user_message
-                )
-                
-                response = 'Mohon menunggu balasan dari call center kami. Jika ingin melanjutkan dengan saya, silahkan ketikan "balik ke bot"'
-                
-                self.conversation_manager.add_message(
-                    self.current_conversation_id, 'assistant', response
-                )
-                return response
-
-        # 2. CALL INTENT CLASSIFIER (The Trigger)
-        # ... continue with existing code
-
-        # 2. CALL INTENT CLASSIFIER (The Trigger)
-        # Identify user intent and extract entities based on current state
+        # 2. Classify intent + extract entities
         intent_result = self.intent_classifier.classify_and_extract(user_message, current_order_state)
 
         print(f"Intent: {intent_result.intent}")
         if intent_result.entities.product_name:
             print(f"🤖 LLM EXTRACTED PRODUCT: '{intent_result.entities.product_name}'")
-        # 3. Store user message with extracted entities for DB visibility
+
+        # 3. Store user message
         self.conversation_manager.add_message(
             conversation_id=self.current_conversation_id,
             role='user',
@@ -183,7 +116,12 @@ class Orchestrator:
             entities=intent_result.entities.model_dump()
         )
 
-        
+        # 4. Handle resume flow
+        if self.awaiting_resume_response:
+            response = self._handle_resume_response(user_message)
+            self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
+            self.awaiting_resume_response = False
+            return response
 
         # ---------------------------------------------------------------
         # NEW: Handle HUMAN_HANDOFF intent
@@ -191,34 +129,30 @@ class Orchestrator:
         # because the user explicitly wants a human regardless of state.
         # ---------------------------------------------------------------
         if intent_result.intent == "HUMAN_HANDOFF":
-            response = self._handle_human_handoff()
+            response = self._handle_human_handoff(current_order_state)
             self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
             return response
 
-        # 4. Handle Special Flow: Resume incomplete order
-        if self.awaiting_resume_response:
-            response = self._handle_resume_response(user_message)
-            self.conversation_manager.add_message(
-                self.current_conversation_id, 'assistant', response
-            )
-            self.awaiting_resume_response = False
+        # ---------------------------------------------------------------
+        # NEW: If we are already in handoff state but user sends a new
+        # message (e.g. they changed their mind and want to continue),
+        # offer to resume the bot conversation.
+        # ---------------------------------------------------------------
+        if self.awaiting_human_handoff:
+            response = self._handle_post_handoff_message(user_message, current_order_state, intent_result)
+            self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
             return response
 
-        
-
-        # 5. PRIORITY: Handle order confirmation if awaiting
-        # This must come BEFORE intent checks to prevent "ya" being classified as CHIT_CHAT
+        # 5. Handle order confirmation if awaiting
         if self.awaiting_order_confirmation and current_order_state.is_complete and current_order_state.order_status == "in_progress":
             response = self._handle_confirmation_response(user_message, current_order_state)
             self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
             return response
         elif self.awaiting_order_confirmation:
-            # Flag is set but order is not ready for confirmation - reset flag
             self.awaiting_order_confirmation = False
 
-        # 6. CHIT_CHAT: Handle courtesy responses and casual conversation
+        # 6. CHIT_CHAT
         if intent_result.intent == "CHIT_CHAT":
-            # Use LLM to generate natural response
             context = self.conversation_manager.get_context(self.current_conversation_id)
 
             if self.current_language == 'en':
@@ -239,19 +173,6 @@ RULES:
 - If customer says "nothing else/that's all" → respond "Thank you! Don't hesitate to contact us again if you need anything. Have a great day!"
 - If customer says "wait/hold on" → respond "Sure, I'll wait"
 - Stay professional and not too casual
-
-EXAMPLES:
-User: "thank you"
-Bot: "You're welcome! Is there anything else I can help you with?"
-
-User: "good afternoon"
-Bot: "Good afternoon! How can I help you today?"
-
-User: "okay sure"
-Bot: "Alright, thank you. Please let me know if you need anything."
-
-User: "nothing else, thanks"
-Bot: "Thank you for contacting us! Don't hesitate to chat again if you need anything. Have a great day!"
 """
             else:
                 system_prompt = """Anda adalah customer service call center profesional di Indonesia.
@@ -271,27 +192,13 @@ ATURAN:
 - Jika customer bilang "tidak ada lagi/sudah cukup" → respond "Terima kasih! Jangan ragu hubungi kami lagi jika ada yang dibutuhkan"
 - Jika customer bilang "ditunggu ya/sebentar ya" → respond "Baik, saya tunggu"
 - Tetap profesional dan jangan terlalu casual
-
-CONTOH:
-User: "terima kasih"
-Bot: "Sama-sama! Ada yang bisa saya bantu lagi?"
-
-User: "selamat siang"
-Bot: "Selamat siang! Ada yang bisa saya bantu hari ini?"
-
-User: "oke siap"
-Bot: "Baik, terima kasih. Silakan lanjutkan jika ada yang dibutuhkan."
-
-User: "tidak ada lagi, makasih"
-Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang dibutuhkan. Selamat beraktivitas!"
 """
 
             response = self.llm_service.chat(
                 user_message=user_message,
                 system_prompt=system_prompt,
-                conversation_history=context[-3:]  # Last 3 messages for context
+                conversation_history=context[-3:]
             )
-
             self.conversation_manager.add_message(
                 conversation_id=self.current_conversation_id,
                 role='assistant',
@@ -299,14 +206,13 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
             )
             return response
 
-        # 6. STRICT REDIRECTION: If intent is not ORDER or CANCEL, redirect to Call Center
+        # 7. STRICT REDIRECTION for non-order intents (FALLBACK / UNKNOWN)
         if intent_result.intent not in ["ORDER", "CANCEL_ORDER"]:
-            # Check if user is asking to switch language
             user_lower = user_message.lower()
-            if any(phrase in user_lower for phrase in ['speak english', 'talk in english', 'use english', 'english please', 'can we just talk in english']):
+            if any(p in user_lower for p in ['speak english', 'talk in english', 'use english', 'english please', 'can we just talk in english']):
                 self.current_language = 'en'
                 response = "Of course! I'll continue in English. How can I help you with your order?"
-            elif any(phrase in user_lower for phrase in ['bahasa indonesia', 'pakai bahasa indonesia', 'bicara bahasa indonesia']):
+            elif any(p in user_lower for p in ['bahasa indonesia', 'pakai bahasa indonesia', 'bicara bahasa indonesia']):
                 self.current_language = 'id'
                 response = "Tentu! Saya akan lanjutkan dalam Bahasa Indonesia. Ada yang bisa saya bantu dengan pesanan Anda?"
             elif self.current_language == 'en':
@@ -321,28 +227,18 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
             )
             return response
 
-        # 7. CANCELATION
+        # 8. CANCEL_ORDER
         if intent_result.intent == "CANCEL_ORDER":
-           # Check if current order is in progress (CEK INI DULUAN!)
             if current_order_state.order_status == "in_progress":
-                # User wants to cancel the CURRENT ongoing order
-                # Reset order state (buang pesanan yang dibatalkan)
                 self.conversation_manager.reset_order_state(self.current_conversation_id)
-
                 if self.current_language == 'en':
                     response = "Order has been cancelled. Is there anything else I can help you with?"
                 else:
                     response = "Pesanan telah dibatalkan. Ada yang bisa saya bantu lagi?"
                 self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
                 return response
-
             else:
-                # No active order to cancel
-                # Check if there are any completed orders in database
                 previous_orders = self.conversation_manager.get_previous_orders(self.current_conversation_id)
-
-                # If user has completed orders, they might want to cancel those
-                # → Forward to call center
                 if previous_orders and len(previous_orders) > 0:
                     if self.current_language == 'en':
                         response = "Sorry, for this service we will forward it to our call center. Please wait a moment, we will contact you back at this number"
@@ -351,7 +247,6 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
                     self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
                     return response
                 else:
-                    # No active order AND no previous orders
                     if self.current_language == 'en':
                         response = "There is no active order to cancel. Is there anything I can help you with?"
                     else:
@@ -359,51 +254,36 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
                     self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
                     return response
 
-            
-
-           
-        # 8. PRE-GENERATION CHECK: Check for completed status
+        # 9. Pre-generation check for completed status
         if current_order_state.order_status == "completed":
             context = self.conversation_manager.get_context(self.current_conversation_id)
             response = self._generate_response(current_order_state, user_message, context)
             self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
             return response
 
-        # 8b. PRE-FILL: Auto-fill customer data from previous orders if available
+        # 9b. Auto-fill customer data from previous orders
         if current_order_state.order_status == "new" or (
             current_order_state.customer_name is None and
             current_order_state.customer_company is None
         ):
-            # Check if we have previous order data in conversation history
             previous_orders = self.conversation_manager.get_previous_orders(self.current_conversation_id)
             if previous_orders and len(previous_orders) > 0:
-                last_order = previous_orders[0]  # Most recent order
+                last_order = previous_orders[0]
                 if current_order_state.customer_name is None and last_order.get('customer_name'):
                     current_order_state.customer_name = last_order['customer_name']
                 if current_order_state.customer_company is None and last_order.get('customer_company'):
                     current_order_state.customer_company = last_order['customer_company']
-
-                # Update in database
-                self.conversation_manager.update_order_state(
-                    self.current_conversation_id,
-                    current_order_state
-                )
+                self.conversation_manager.update_order_state(self.current_conversation_id, current_order_state)
                 print(f"✅ Auto-filled customer data from previous order")
 
-        # 8c. UPDATE ORDER STATE: Apply new data to the state object
+        # 9c. Update order state with new entities
         if intent_result.intent == "ORDER" and intent_result.has_entities():
             e = intent_result.entities
 
-            # SEMANTIC SEARCH: Match product to database using embeddings
             if e.product_name:
-                # Try semantic search first
                 matches = self.semantic_search.search_part_by_description(
-                    query=e.product_name,
-                    top_k=3,
-                    threshold=0.55  # 55% minimum similarity
+                    query=e.product_name, top_k=3, threshold=0.55
                 )
-
-                # Print top 3 results
                 if matches:
                     print(f"\n📋 TOP 3 SEMANTIC SEARCH RESULTS:")
                     for i, match in enumerate(matches[:3], 1):
@@ -411,68 +291,56 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
                         print(f"   {i}. Score: {score:.4f} | {match['partnum']} | {match['description']}")
                     print()
 
-                # If no semantic matches, try fuzzy search
                 if not matches:
                     matches = self.semantic_search.fuzzy_search_by_description(
-                        query=e.product_name,
-                        top_k=3
+                        query=e.product_name, top_k=3
                     )
 
-                # Handle matches - ALWAYS auto-select best match
                 if matches and len(matches) > 0:
                     best_match = matches[0]
-
-                    # Create order line if not exists
                     if len(current_order_state.order_lines) == 0:
                         current_order_state.order_lines.append(OrderLine())
-
-                    # Auto-select best match (no user selection needed)
                     line = current_order_state.order_lines[0]
                     line.partnum = best_match['partnum']
                     line.product_name = best_match['description']
                     line.unit = best_match.get('uom', best_match.get('unit', e.unit))
-                    if e.quantity: line.quantity = e.quantity
-
-                # No matches: use raw text
+                    if e.quantity:
+                        line.quantity = e.quantity
                 else:
                     if len(current_order_state.order_lines) == 0:
                         current_order_state.order_lines.append(OrderLine())
-
                     line = current_order_state.order_lines[0]
                     line.product_name = e.product_name
-                    if e.quantity: line.quantity = e.quantity
-                    if e.unit: line.unit = e.unit
+                    if e.quantity:
+                        line.quantity = e.quantity
+                    if e.unit:
+                        line.unit = e.unit
 
-            # Map other fields to order_state
-            if e.customer_name: current_order_state.customer_name = e.customer_name
-            if e.customer_company: current_order_state.customer_company = e.customer_company
+            if e.customer_name:
+                current_order_state.customer_name = e.customer_name
+            if e.customer_company:
+                current_order_state.customer_company = e.customer_company
             if e.delivery_date:
-                # Validate delivery date before setting
                 validation_error = self._validate_delivery_date(e.delivery_date)
                 if validation_error:
-                    # Return error message to user
                     self.conversation_manager.add_message(
                         conversation_id=self.current_conversation_id,
                         role='assistant',
                         content=validation_error
                     )
                     return validation_error
-
                 current_order_state.delivery_date = e.delivery_date
 
-            # Update quantity/unit if no product_name was extracted
             if not e.product_name and len(current_order_state.order_lines) > 0:
                 line = current_order_state.order_lines[0]
-                if e.quantity: line.quantity = e.quantity
-                if e.unit: line.unit = e.unit
+                if e.quantity:
+                    line.quantity = e.quantity
+                if e.unit:
+                    line.unit = e.unit
 
-            # This triggers the cache update
-            self.conversation_manager.update_order_state(
-                self.current_conversation_id,
-                current_order_state
-            )
+            self.conversation_manager.update_order_state(self.current_conversation_id, current_order_state)
 
-        # 9. TRIGGER CONFIRMATION: If state just became complete
+        # 10. Trigger confirmation if state just became complete
         current_order_state.update_missing_fields()
         if current_order_state.is_complete and current_order_state.order_status == "in_progress":
             response = self._generate_confirmation_prompt(current_order_state)
@@ -480,53 +348,209 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
             self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
             return response
 
-        # 10. NORMAL FLOW: Generate LLM response asking for missing fields
+        # 11. Normal flow — ask for missing fields
         context = self.conversation_manager.get_context(self.current_conversation_id)
         response = self._generate_response(current_order_state, user_message, context)
-
         self.conversation_manager.add_message(
             conversation_id=self.current_conversation_id,
             role='assistant',
             content=response,
             entities=intent_result.entities.model_dump()
         )
-
         return response
-    
-    def _handle_human_handoff(self) -> str:
+
+    # ===========================================================
+    # NEW: HUMAN HANDOFF HANDLERS
+    # ===========================================================
+
+    def _handle_human_handoff(self, current_order_state: OrderState) -> str:
         """
         Handle explicit user request to speak with a human agent.
-        Simplified version - just set the flag and return a simple message.
+
+        Key behaviours:
+        - Does NOT reset or delete the order state in cache/DB
+        - Builds a context summary so the human agent can see what was
+          already captured, reducing repetition for the customer
+        - Sets self.awaiting_human_handoff = True so we know the user
+          is in this mode and subsequent messages are handled gracefully
+
+        Args:
+            current_order_state: Current (possibly partial) order state
 
         Returns:
             Handoff message string
         """
-        # Mark that we are in handoff mode
+        # Mark that we are in handoff mode — cache stays intact
         self.awaiting_human_handoff = True
 
-        response = (
-            "Tentu! Saya akan segera menghubungkan Anda ke call center kami. "
-            "Mereka akan menghubungi Anda segera di nomor ini. Mohon ditunggu sebentar.\n\n"
-            'Jika Anda ingin kembali dengan bot, silahkan ketikan "balik ke bot"'
+        # Build a brief summary of whatever we already captured so the
+        # human agent (and the customer) can see it clearly
+        summary = self._build_order_summary_for_handoff(current_order_state)
+
+        if self.current_language == 'en':
+            if summary:
+                response = (
+                    f"Of course! I'll connect you to one of our agents right away.\n\n"
+                    f"📋 Here's what I've noted so far:\n{summary}\n\n"
+                    f"Our agent will contact you shortly at this number. "
+                    f"You don't need to repeat the information above — they'll have it ready. "
+                    f"Is there anything else you'd like to add before I transfer you?"
+                )
+            else:
+                response = (
+                    "Of course! I'll connect you to one of our agents right away. "
+                    "Our agent will contact you shortly at this number. "
+                    "Please hold — is there anything you'd like to share before the transfer?"
+                )
+        else:
+            if summary:
+                response = (
+                    f"Tentu! Saya akan segera menghubungkan Anda ke agen kami.\n\n"
+                    f"📋 Informasi yang sudah saya catat:\n{summary}\n\n"
+                    f"Agen kami akan menghubungi Anda segera di nomor ini. "
+                    f"Anda tidak perlu mengulangi informasi di atas — mereka sudah memilikinya. "
+                    f"Ada yang ingin ditambahkan sebelum saya alihkan?"
+                )
+            else:
+                response = (
+                    "Tentu! Saya akan segera menghubungkan Anda ke agen kami. "
+                    "Agen kami akan menghubungi Anda segera di nomor ini. "
+                    "Mohon ditunggu sebentar."
+                )
+
+        print(f"🔀 HUMAN_HANDOFF triggered. Order state preserved in cache for conversation: {self.current_conversation_id}")
+        return response
+
+    def _build_order_summary_for_handoff(self, order_state: OrderState) -> str:
+        """
+        Build a human-readable summary of captured order data.
+        Returns an empty string if nothing has been captured yet.
+
+        Args:
+            order_state: Current order state
+
+        Returns:
+            Formatted summary string, or empty string
+        """
+        lines = []
+
+        if order_state.customer_name:
+            lines.append(f"  - Nama       : {order_state.customer_name}")
+        if order_state.customer_company:
+            lines.append(f"  - Perusahaan : {order_state.customer_company}")
+        if order_state.delivery_date:
+            lines.append(f"  - Tgl Kirim  : {order_state.delivery_date}")
+
+        if order_state.order_lines:
+            line = order_state.order_lines[0]
+            if line.product_name:
+                product_str = line.product_name
+                if line.partnum:
+                    product_str += f" ({line.partnum})"
+                lines.append(f"  - Produk     : {product_str}")
+            if line.quantity:
+                qty_str = str(line.quantity)
+                if line.unit:
+                    qty_str += f" {line.unit}"
+                lines.append(f"  - Jumlah     : {qty_str}")
+
+        return "\n".join(lines)
+
+    def _handle_post_handoff_message(self, user_message: str, current_order_state: OrderState, intent_result) -> str:
+        """
+        Called when awaiting_human_handoff is True and the user sends
+        another message. Two sub-cases:
+          A) User wants to cancel the handoff and continue with the bot
+          B) User is adding info / saying something before the agent arrives
+
+        Args:
+            user_message: The new user message
+            current_order_state: Current (preserved) order state
+            intent_result: Already-classified intent for this message
+
+        Returns:
+            Bot response
+        """
+        user_lower = user_message.lower().strip()
+
+        # Sub-case A: User explicitly wants to go back to the bot
+        cancel_handoff_keywords_id = ['batal', 'ga jadi', 'gak jadi', 'tidak jadi', 'lanjut bot', 'balik ke bot', 'bot saja', 'bot aja']
+        cancel_handoff_keywords_en = ['cancel', 'nevermind', 'never mind', 'go back', 'back to bot', 'continue with bot']
+
+        wants_to_cancel_handoff = (
+            any(k in user_lower for k in cancel_handoff_keywords_id) or
+            any(k in user_lower for k in cancel_handoff_keywords_en)
         )
 
-        print(f"🔀 HUMAN_HANDOFF triggered. Conversation: {self.current_conversation_id}")
-        return response
-    
-    
-    
-    
+        if wants_to_cancel_handoff:
+            # Turn off handoff mode, resume normal bot flow
+            self.awaiting_human_handoff = False
 
+            if self.current_language == 'en':
+                return (
+                    "No problem! I'm back. Let me continue helping you with your order. "
+                    "All the information you've provided is still saved. What would you like to do?"
+                )
+            else:
+                return (
+                    "Baik! Saya kembali. Semua informasi yang sudah Anda berikan masih tersimpan. "
+                    "Mari kita lanjutkan pesanan Anda. Ada yang bisa saya bantu?"
+                )
+
+        # Sub-case B: User is sending info or a message while waiting
+        # Acknowledge and reassure — do NOT reset handoff flag
+        # We still accept ORDER data updates in case they add info
+        if intent_result.intent == "ORDER" and intent_result.has_entities():
+            # Silently update state so the human agent benefits from it
+            e = intent_result.entities
+            if e.customer_name:
+                current_order_state.customer_name = e.customer_name
+            if e.customer_company:
+                current_order_state.customer_company = e.customer_company
+            if e.delivery_date:
+                current_order_state.delivery_date = e.delivery_date
+            if e.product_name and len(current_order_state.order_lines) > 0:
+                current_order_state.order_lines[0].product_name = e.product_name
+            if e.quantity and len(current_order_state.order_lines) > 0:
+                current_order_state.order_lines[0].quantity = e.quantity
+            if e.unit and len(current_order_state.order_lines) > 0:
+                current_order_state.order_lines[0].unit = e.unit
+
+            # Save the updated state
+            self.conversation_manager.update_order_state(self.current_conversation_id, current_order_state)
+
+            if self.current_language == 'en':
+                return (
+                    "Got it! I've noted that information and passed it along to the agent. "
+                    "They will contact you shortly."
+                )
+            else:
+                return (
+                    "Baik! Informasi tersebut sudah saya catat dan akan diteruskan ke agen. "
+                    "Mereka akan segera menghubungi Anda."
+                )
+
+        # Generic acknowledgment while in handoff mode
+        if self.current_language == 'en':
+            return (
+                "I've noted your message. Our agent will contact you shortly. "
+                "If you'd like to continue with me instead, just type 'go back'."
+            )
+        else:
+            return (
+                "Pesan Anda sudah saya catat. Agen kami akan segera menghubungi Anda. "
+                "Jika ingin melanjutkan dengan saya, ketik 'batal' atau 'balik ke bot'."
+            )
+
+    # ===========================================================
+    # All existing methods below — unchanged
+    # ===========================================================
 
     def _generate_response(self, order_state: OrderState, user_message: str, context: list) -> str:
-        """
-        Generate LLM response with order state context
-        """
+        """Generate LLM response with order state context"""
 
-        # Check if dealing with completed order
         is_completed = order_state.order_status == "completed"
 
-        # Build different system prompts based on order status and language
         if is_completed:
             if self.current_language == 'en':
                 system_prompt = f"""You are a professional call center customer service representative in Indonesia.
@@ -564,8 +588,6 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
         """
 
         elif order_state.is_complete and order_state.order_status == "in_progress":
-            # Generate confirmation prompt instead of asking LLM
-            # IMPORTANT: Set flag to await confirmation
             self.awaiting_order_confirmation = True
             return self._generate_confirmation_prompt(order_state)
 
@@ -638,46 +660,30 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
         return self.llm_service.chat(
             user_message=user_message,
             system_prompt=system_prompt,
-            conversation_history=context[:-1]  # Exclude current message
+            conversation_history=context[:-1]
         )
-
 
     def get_current_order_state(self) -> dict:
         """Get current order state as dict (for debugging/display)"""
         if not self.current_conversation_id:
             return {}
-
         order_state = self.conversation_manager.get_order_state(self.current_conversation_id)
         return order_state.to_dict()
 
     def confirm_and_complete_order(self) -> str:
-        """
-        Mark order as completed and save to database
-        This should be called after user confirms the order
-
-        Returns:
-            Confirmation message
-        """
+        """Mark order as completed and save to database"""
         from datetime import datetime
         from src.database.sql_schema import Order
 
-        # Get current order state
         order_state = self.conversation_manager.get_order_state(self.current_conversation_id)
 
-        # Validate order is complete
         if not order_state.is_complete:
             return "Pesanan belum lengkap. Mohon lengkapi informasi yang diperlukan."
 
-        # 💾 SAVE ORDER TO DATABASE
         order_id = self._save_order_to_database(order_state)
-
-        # Mark as completed (locks from further edits)
         self.conversation_manager.mark_order_completed(self.current_conversation_id)
-
-        # 🔄 RESET ORDER STATE for new order
         self.conversation_manager.reset_order_state(self.current_conversation_id)
 
-        # Generate confirmation message
         order_line = order_state.order_lines[0]
 
         if self.current_language == 'en':
@@ -718,15 +724,7 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
         return confirmation
 
     def _save_order_to_database(self, order_state) -> str:
-        """
-        Save completed order to database
-
-        Args:
-            order_state: Completed order state
-
-        Returns:
-            order_id: Generated order ID (e.g., ORD-20260209-0001)
-        """
+        """Save completed order to database"""
         from datetime import datetime
         from src.database.sql_schema import Order
         from src.services.sql_service import SQLService
@@ -734,19 +732,16 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
         sql_service = SQLService()
 
         try:
-            # Generate unique order ID
             now = datetime.now()
-            date_str = now.strftime("%Y%m%d")  # 20260209
+            date_str = now.strftime("%Y%m%d")
 
-            # Get count of orders today to generate sequence number
             today_orders = sql_service.db.query(Order).filter(
                 Order.order_id.like(f"ORD-{date_str}-%")
             ).count()
 
             sequence = today_orders + 1
-            order_id = f"ORD-{date_str}-{sequence:04d}"  # ORD-20260209-0001
+            order_id = f"ORD-{date_str}-{sequence:04d}"
 
-            # Prepare items JSON
             items = []
             for line in order_state.order_lines:
                 items.append({
@@ -756,7 +751,6 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
                     "unit": line.unit
                 })
 
-            # Create order record
             new_order = Order(
                 order_id=order_id,
                 conversation_id=self.current_conversation_id,
@@ -774,31 +768,20 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
             sql_service.db.commit()
 
             print(f"✅ Order saved to database: {order_id}")
-
             return order_id
 
         except Exception as e:
             print(f"❌ Error saving order to database: {e}")
             sql_service.db.rollback()
-            # Return fallback order ID
             return f"ORD-{datetime.now().strftime('%Y%m%d')}-TEMP"
 
         finally:
             sql_service.close()
 
     def _generate_confirmation_prompt(self, order_state: OrderState) -> str:
-        """
-        Generate order confirmation prompt when all fields are complete
-
-        Args:
-            order_state: Complete order state
-
-        Returns:
-            Confirmation message
-        """
+        """Generate order confirmation prompt when all fields are complete"""
         order_line = order_state.order_lines[0]
 
-        # Build product info with part number if available
         product_info = order_line.product_name
         if order_line.partnum:
             product_info = f"{order_line.product_name} ({order_line.partnum})"
@@ -843,62 +826,35 @@ Type:
         return confirmation
 
     def _handle_confirmation_response(self, user_message: str, order_state: OrderState) -> str:
-        """
-        Handle user's response to order confirmation prompt
-
-        Args:
-            user_message: User's response
-            order_state: Current order state
-
-        Returns:
-            Bot response
-        """
+        """Handle user's response to order confirmation prompt"""
         user_input = user_message.lower().strip()
 
-        # Option 1: User confirms (Ya/Konfirmasi/OK) - STRICT CHECK
-        # Must be standalone word, not part of other words like "aja"
         confirmation_words = ['ya', 'konfirmasi', 'yes', 'ok', 'oke', 'benar', 'betul']
         if any(user_input == word or user_input.startswith(word + ' ') or user_input.endswith(' ' + word) for word in confirmation_words):
-            # Complete the order
             response = self.confirm_and_complete_order()
             self.awaiting_order_confirmation = False
             return response
 
-        # Option 2: User wants to cancel (Batal)
         elif any(word in user_input for word in ['batal', 'cancel', 'stop', 'gak jadi', 'tidak jadi']):
-            # Reset order state (buang pesanan yang dibatalkan)
             self.conversation_manager.reset_order_state(self.current_conversation_id)
-
             self.awaiting_order_confirmation = False
-
             if self.current_language == 'en':
                 return "Order cancelled. Thank you. Is there anything else I can help you with?"
             else:
                 return "Pesanan dibatalkan. Terima kasih. Ada yang bisa saya bantu lagi?"
 
-        # Option 3: User wants to edit (Ubah/Ganti/Edit)
         elif 'ubah' in user_input or 'edit' in user_input or 'ganti' in user_input or 'salah' in user_input or 'change' in user_input or 'modify' in user_input:
-            # 🔥 NEW: Use LLM to extract changes from natural language
             changes_result = self._extract_order_changes(user_message, order_state)
 
             if changes_result['has_changes']:
-                # Apply changes to order state
                 updated = self._apply_order_changes(order_state, changes_result['changes'])
 
-                # Check if there was a validation error
                 if isinstance(updated, dict) and 'error' in updated:
-                    # Return validation error to user
                     return updated['error']
 
                 if updated:
-                    # Update order state
                     order_state.update_missing_fields()
-                    self.conversation_manager.update_order_state(
-                        self.current_conversation_id,
-                        order_state
-                    )
-
-                    # Show updated confirmation
+                    self.conversation_manager.update_order_state(self.current_conversation_id, order_state)
                     self.awaiting_order_confirmation = True
                     return self._generate_confirmation_prompt(order_state)
                 else:
@@ -907,13 +863,11 @@ Type:
                     else:
                         return "Maaf, saya tidak bisa memahami perubahan yang Anda inginkan. Bisa dijelaskan lebih detail?"
             else:
-                # No clear changes detected - ask for clarification
                 if self.current_language == 'en':
                     return "Alright, which field would you like to change? (example: 'change date to tomorrow', 'change company to CV ABC')"
                 else:
                     return "Baik, field apa yang ingin diubah? (contoh: 'ubah tanggal jadi besok', 'ganti perusahaan jadi CV ABC')"
 
-        # Option 4: Unclear response - ask again
         else:
             if self.current_language == 'en':
                 return """Sorry, I don't quite understand.
@@ -933,16 +887,7 @@ Ketik:
 - "Batal" untuk membatalkan"""
 
     def _extract_order_changes(self, user_message: str, current_order_state: OrderState) -> dict:
-        """
-        Use LLM to extract order changes from natural language
-
-        Args:
-            user_message: User's message (e.g., "ubah perusahaan jadi CV Surya Dadi dan tanggal jadi besok")
-            current_order_state: Current order state
-
-        Returns:
-            dict with 'has_changes' and 'changes' keys
-        """
+        """Use LLM to extract order changes from natural language"""
         from datetime import datetime
 
         now = datetime.now()
@@ -984,22 +929,7 @@ ATURAN:
 2. Jika user menyebut "lusa" → CURRENT_DATE + 2 hari
 3. Jika user menyebut tanggal spesifik → konversi ke YYYY-MM-DD
 4. Hanya isi field yang DIUBAH, sisanya null
-5. Jika tidak ada perubahan jelas → has_changes: false
-
-CONTOH:
-User: "ubah perusahaan jadi CV Surya Dadi dan tanggal jadi besok"
-Output:
-{{
-  "has_changes": true,
-  "changes": {{
-    "customer_name": null,
-    "customer_company": "CV Surya Dadi",
-    "delivery_date": "2026-02-10",
-    "product_name": null,
-    "quantity": null,
-    "unit": null
-  }}
-}}"""
+5. Jika tidak ada perubahan jelas → has_changes: false"""
 
         try:
             llm_response = self.llm_service.chat(
@@ -1007,62 +937,39 @@ Output:
                 system_prompt=system_prompt,
                 conversation_history=[]
             )
-
-            # Parse JSON from LLM
             result = json.loads(llm_response)
             return result
-
         except Exception as e:
             print(f"⚠️ Error extracting changes: {e}")
             return {"has_changes": False, "changes": {}}
 
     def _apply_order_changes(self, order_state: OrderState, changes: dict) -> bool:
-        """
-        Apply extracted changes to order state
-
-        Args:
-            order_state: Current order state (will be modified in place)
-            changes: Dict of changes from _extract_order_changes
-
-        Returns:
-            True if any changes were applied, False otherwise
-        """
+        """Apply extracted changes to order state"""
         applied = False
 
-        # Apply customer name change
         if changes.get('customer_name'):
             order_state.customer_name = changes['customer_name']
             applied = True
             print(f"✏️ Updated customer_name: {changes['customer_name']}")
 
-        # Apply customer company change
         if changes.get('customer_company'):
             order_state.customer_company = changes['customer_company']
             applied = True
             print(f"✏️ Updated customer_company: {changes['customer_company']}")
 
-        # Apply delivery date change (with validation)
         if changes.get('delivery_date'):
-            # Validate date first
             validation_error = self._validate_delivery_date(changes['delivery_date'])
             if validation_error:
-                # Return error in a special way that caller can detect
                 return {"error": validation_error}
-
             order_state.delivery_date = changes['delivery_date']
             applied = True
             print(f"✏️ Updated delivery_date: {changes['delivery_date']}")
 
-        # Apply product changes
         if len(order_state.order_lines) > 0:
             if changes.get('product_name'):
-                # Need to do semantic search for new product
                 matches = self.semantic_search.search_part_by_description(
-                    query=changes['product_name'],
-                    top_k=3,
-                    threshold=0.55
+                    query=changes['product_name'], top_k=3, threshold=0.55
                 )
-                
                 if matches and len(matches) > 0:
                     best_match = matches[0]
                     order_state.order_lines[0].product_name = best_match['description']
@@ -1082,22 +989,11 @@ Output:
 
         return applied
 
-    #RESPONSE FOR RESUME CHAT
     def _generate_resume_prompt(self, last_order_state: dict) -> str:
-        """
-        Generate friendly prompt to ask user if they want to resume incomplete order
-
-        Args:
-            last_order_state: Dictionary of last order state
-
-        Returns:
-            Resume prompt message
-        """
-        # Extract info from last order
+        """Generate friendly prompt to ask user if they want to resume incomplete order"""
         customer_name = last_order_state.get('customer_name', '')
         order_lines = last_order_state.get('order_lines', [])
 
-        # Build order summary
         order_summary = ""
         if order_lines and len(order_lines) > 0:
             line = order_lines[0]
@@ -1110,10 +1006,8 @@ Output:
                 if quantity:
                     order_summary += f"\n- Jumlah: {quantity} {unit}" if unit else f"\n- Jumlah: {quantity}"
 
-        # Build greeting
         greeting = f"Halo {customer_name}!" if customer_name else "Halo!"
 
-        # Build full prompt
         if order_summary:
             message = f"""{greeting} Sepertinya pesanan Anda sebelumnya:{order_summary}
 
@@ -1134,40 +1028,20 @@ Output:
         return message
 
     def _handle_resume_response(self, user_message: str) -> str:
-        """
-        Handle user's response to resume prompt
-
-        Args:
-            user_message: User's response
-
-        Returns:
-            Bot response
-        """
+        """Handle user's response to resume prompt"""
         user_input = user_message.lower().strip()
 
-        # Check if user wants to continue
         if any(word in user_input for word in ['ya', 'lanjut', 'iya', 'yes', 'continue', 'ok', 'oke']):
-            # User wants to continue - keep existing order_state
             current_order_state = self.conversation_manager.get_order_state(self.current_conversation_id)
-
-            # Generate response asking for missing fields
             context = self.conversation_manager.get_context(self.current_conversation_id)
             return self._generate_response(current_order_state, "lanjutkan pesanan", context)
 
-        # Check if user wants to start fresh
         elif any(word in user_input for word in ['baru', 'mulai baru', 'gak', 'tidak', 'no', 'cancel']):
-            # User wants fresh start - clear order state
             new_order_state = OrderState()
             new_order_state.order_status = "new"
-
-            self.conversation_manager.update_order_state(
-                self.current_conversation_id,
-                new_order_state
-            )
-
+            self.conversation_manager.update_order_state(self.current_conversation_id, new_order_state)
             return "Baik, kita mulai pesanan baru. Produk apa yang ingin Anda pesan?"
 
-        # User response unclear - ask again
         else:
             return """Maaf, saya kurang mengerti.
 
@@ -1175,53 +1049,32 @@ Output:
     Ketik "Ya" untuk melanjutkan atau "Mulai Baru" untuk pesanan baru."""
 
     def _validate_delivery_date(self, delivery_date: str) -> str:
-        """
-        Validate delivery date
-
-        Args:
-            delivery_date: Date string in YYYY-MM-DD format
-
-        Returns:
-            Error message if invalid, None if valid
-        """
+        """Validate delivery date"""
         from datetime import datetime
         import pytz
 
-        # Parse delivery date
         try:
             delivery_dt = datetime.strptime(delivery_date, "%Y-%m-%d")
         except ValueError:
             return "Maaf, format tanggal tidak valid. Mohon berikan tanggal dalam format yang jelas (contoh: 'besok', '15 Februari', dll)."
 
-        # Get current date in WIB timezone
         wib = pytz.timezone('Asia/Jakarta')
         now_wib = datetime.now(wib)
         today = now_wib.date()
-
-        # Convert delivery_dt to date for comparison
         delivery_date_obj = delivery_dt.date()
 
-        # Check 1: Date is in the past
         if delivery_date_obj < today:
-            # Calculate how many days ago
             days_ago = (today - delivery_date_obj).days
-
             if days_ago == 1:
                 time_desc = "kemarin"
             elif days_ago == 2:
                 time_desc = "kemarin lusa"
             else:
                 time_desc = f"{days_ago} hari yang lalu"
-
             return f"Maaf, tanggal {delivery_date} itu sudah lewat ({time_desc}). Untuk tanggal berapa ya pengirimannya?"
 
-        # Check 2: Date is Sunday (weekday 6)
-        if delivery_dt.weekday() == 6:  # Sunday = 6
-            # Format date in Indonesian
-            day_name = "Minggu"
+        if delivery_dt.weekday() == 6:
             date_formatted = delivery_dt.strftime("%d %B %Y")
-
-            # Map month names to Indonesian
             month_map = {
                 "January": "Januari", "February": "Februari", "March": "Maret",
                 "April": "April", "May": "Mei", "June": "Juni",
@@ -1230,23 +1083,26 @@ Output:
             }
             for eng, ind in month_map.items():
                 date_formatted = date_formatted.replace(eng, ind)
+            return f"Maaf, tanggal {date_formatted} itu hari Minggu. Kami tidak melayani pengiriman di hari Minggu. Bisa pilih tanggal lain?"
 
-            return f"Maaf, tanggal {date_formatted} itu hari {day_name}. Kami tidak melayani pengiriman di hari Minggu. Bisa pilih tanggal lain?"
-
-        # Valid date
         return None
 
-    # HELPER -- do not change
     def warm_up_cache(self):
         """Load all parts into cache for fast semantic search"""
         print("Warming up cache with customer data...")
         db = SessionLocal()
         parts = db.query(Parts).all()
         for c in parts:
-            cache_store.set(c.id, {"id": c.id, "partnum": c.partnum, "description": c.description, "uom": c.uom, "uomdesc": c.uomdesc, "embedding": c.embedding})
+            cache_store.set(c.id, {
+                "id": c.id,
+                "partnum": c.partnum,
+                "description": c.description,
+                "uom": c.uom,
+                "uomdesc": c.uomdesc,
+                "embedding": c.embedding
+            })
         db.close()
         print(f"Cache ready with {len(parts)} records.")
-        pass
 
     def debug_cache(self):
         """Debug: Print cache contents"""
@@ -1254,43 +1110,34 @@ Output:
         print("🔍 CACHE CONTENTS")
         print("="*50)
 
-        # Show all cache keys (convert to string for safety)
         all_keys = list(self.cache_service._cache.keys())
         print(f"\n📋 Total keys in cache: {len(all_keys)}")
 
-        # Group by type (handle both int and string keys)
         order_states = [k for k in all_keys if isinstance(k, str) and k.startswith("order_state:")]
         contexts = [k for k in all_keys if isinstance(k, str) and k.startswith("context:")]
         customers = [k for k in all_keys if isinstance(k, str) and k.startswith("customer:")]
-        products = [k for k in all_keys if isinstance(k, int)]  # Product IDs are integers
+        products = [k for k in all_keys if isinstance(k, int)]
 
         print(f"\n📦 Products cached: {len(products)}")
         print(f"💬 Conversations cached: {len(contexts)}")
         print(f"📝 Order states cached: {len(order_states)}")
         print(f"👤 Customers cached: {len(customers)}")
 
-        # Show current conversation
         if self.current_conversation_id:
             print(f"\n🎯 CURRENT CONVERSATION: {self.current_conversation_id}")
 
-            # Show order state
             order_state_key = f"order_state:{self.current_conversation_id}"
             if order_state_key in self.cache_service._cache:
                 print(f"\n📝 Order State:")
-                import json
                 print(json.dumps(self.cache_service._cache[order_state_key], indent=2, ensure_ascii=False))
 
-            # Show context
             context_key = f"context:{self.current_conversation_id}"
             if context_key in self.cache_service._cache:
                 print(f"\n💬 Conversation Context (last {len(self.cache_service._cache[context_key])} messages):")
                 for msg in self.cache_service._cache[context_key]:
                     print(f"  {msg['role']:10s}: {msg['content'][:60]}...")
-            
+
             # NEW: Show handoff state
             print(f"\n🔀 Handoff state: {'ACTIVE (waiting for agent)' if self.awaiting_human_handoff else 'None'}")
 
-
         print("="*50 + "\n")
-
-

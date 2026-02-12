@@ -11,6 +11,14 @@ TUGAS: Klasifikasi intent dan ekstrak entities dari pesan user.
 - ORDER: Memesan produk ("mau pesan oksigen", "butuh 5 tabung")
 - CANCEL_ORDER: Membatalkan pesanan ("batal", "cancel", "gak jadi")
 - CHIT_CHAT: Greeting, courtesy, acknowledgment ("terima kasih", "halo", "oke", "tidak ada lagi", "sudah cukup")
+- HUMAN_HANDOFF: User secara eksplisit ingin berbicara dengan manusia/operator/call center
+  * Contoh Indonesia: "minta operator", "sambungkan ke call center", "mau bicara sama orang", 
+    "ada CS yang bisa bantu?", "hubungi customer service", "tolong hubungkan ke agen", 
+    "mau ngomong sama manusia", "bisa minta orang asli?", "saya mau bicara langsung"
+  * Contoh English: "connect me to an agent", "talk to a human", "speak to a representative",
+    "I want a real person", "transfer me to customer service", "get me a human",
+    "talk to someone", "speak to an operator", "connect to call center"
+  * PENTING: Ini berbeda dari FALLBACK. HUMAN_HANDOFF = user SENGAJA minta dihubungkan ke manusia.
 - FALLBACK: Pertanyaan lain yang perlu call center ("berapa harga?", "komplain produk")
 
 === ENTITIES ===
@@ -28,6 +36,7 @@ TUGAS: Klasifikasi intent dan ekstrak entities dari pesan user.
 Keyword: "tabung", "botol", "tube", "cylinder"
 - Kapasitas (6m3, 10m3, 40L) → masuk product_name
 - Quantity → jumlah tabung/botol
+- Product_name → nama + kapasitas
 - Unit → "tabung"/"botol"/"pc" (BUKAN "m3")
 
 Contoh:
@@ -37,8 +46,8 @@ Contoh:
 **2. LIQUID/CURAH (Bulk)**
 Keyword: "liquid", "cair", "bulk", "curah"
 - Angka m3/liter/kg → jadi quantity (BUKAN nama produk)
-- Product_name → nama + "liquid"/"cair" saja
 - Unit → "m3"/"liter"/"kg"
+- Penamaan "cair" atau "cairan" ubah menjadi "liquid"
 
 Contoh:
 "liquid oxygen 10000 m3" → product_name="liquid oxygen", quantity=10000, unit="m3" [CORRECT]
@@ -123,6 +132,20 @@ User: "nitrogen cair 5000 liter"
     "delivery_date": null,
     "cancellation_reason": null
   }
+
+  User: "bisa minta disambungkan ke call center?"
+{
+  "intent": "HUMAN_HANDOFF",
+  "entities": {
+    "product_name": null,
+    "quantity": null,
+    "unit": null,
+    "customer_name": null,
+    "customer_company": null,
+    "delivery_date": null,
+    "cancellation_reason": null
+  }
+}
 }"""
 
 def build_extraction_user_prompt(user_message: str, current_order_state: dict, history: list = None) -> str:

@@ -85,7 +85,7 @@ class IntentClassifier:
             intent = data.get("intent", "UNKNOWN").upper()
             
             # Validate intent
-            valid_intents = ["ORDER", "CANCEL_ORDER", "CHIT_CHAT", "FALLBACK"]
+            valid_intents = ["ORDER", "CANCEL_ORDER", "CHIT_CHAT", "FALLBACK", "HUMAN_HANDOFF"]
             if intent not in valid_intents:
                 intent = "UNKNOWN"
             
@@ -141,6 +141,11 @@ class IntentClassifier:
             return "CANCEL_ORDER"
         elif any(word in text_lower for word in ["chit_chat", "courtesy", "greeting"]):
             return "CHIT_CHAT"
+        elif any(word in text_lower for word in [
+            "human_handoff", "operator", "call center", "agen", "agent",
+            "manusia", "orang asli", "representative"
+        ]):
+            return "HUMAN_HANDOFF"
         elif any(word in text_lower for word in ["fallback", "redirect", "other"]):
             return "FALLBACK"
         else:

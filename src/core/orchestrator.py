@@ -122,6 +122,8 @@ class Orchestrator:
         intent_result = self.intent_classifier.classify_and_extract(user_message, current_order_state)
 
         print(f"Intent: {intent_result.intent}")
+        if intent_result.entities.product_name:
+            print(f"🤖 LLM EXTRACTED PRODUCT: '{intent_result.entities.product_name}'")
         # 3. Store user message with extracted entities for DB visibility
         self.conversation_manager.add_message(
             conversation_id=self.current_conversation_id,
@@ -256,20 +258,9 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
 
         # 7. CANCELATION
         if intent_result.intent == "CANCEL_ORDER":
-            # Check if there are any completed orders in database
-            previous_orders = self.conversation_manager.get_previous_orders(self.current_conversation_id)
-
-            # If user has completed orders, they can't cancel via chatbot
-            if previous_orders and len(previous_orders) > 0:
-                if self.current_language == 'en':
-                    response = "Sorry, for this service we will forward it to our call center. Please wait a moment, we will contact you back at this number"
-                else:
-                    response = "Maaf, untuk layanan ini akan saya teruskan ke pihak call center kami. mohon ditunggu sebentar, kami akan menghubungi anda kembali di nomor ini"
-                self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
-                return response
-
-            # Check if current order is in progress
-            elif current_order_state.order_status == "in_progress":
+           # Check if current order is in progress (CEK INI DULUAN!)
+            if current_order_state.order_status == "in_progress":
+                # User wants to cancel the CURRENT ongoing order
                 # Reset order state (buang pesanan yang dibatalkan)
                 self.conversation_manager.reset_order_state(self.current_conversation_id)
 
@@ -282,12 +273,26 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
 
             else:
                 # No active order to cancel
-                if self.current_language == 'en':
-                    response = "There is no active order to cancel. Is there anything I can help you with?"
+                # Check if there are any completed orders in database
+                previous_orders = self.conversation_manager.get_previous_orders(self.current_conversation_id)
+
+                # If user has completed orders, they might want to cancel those
+                # → Forward to call center
+                if previous_orders and len(previous_orders) > 0:
+                    if self.current_language == 'en':
+                        response = "Sorry, for this service we will forward it to our call center. Please wait a moment, we will contact you back at this number"
+                    else:
+                        response = "Maaf, untuk layanan ini akan saya teruskan ke pihak call center kami. mohon ditunggu sebentar, kami akan menghubungi anda kembali di nomor ini"
+                    self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
+                    return response
                 else:
-                    response = "Tidak ada pesanan aktif yang bisa dibatalkan. Ada yang bisa saya bantu?"
-                self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
-                return response
+                    # No active order AND no previous orders
+                    if self.current_language == 'en':
+                        response = "There is no active order to cancel. Is there anything I can help you with?"
+                    else:
+                        response = "Tidak ada pesanan aktif yang bisa dibatalkan. Ada yang bisa saya bantu?"
+                    self.conversation_manager.add_message(self.current_conversation_id, 'assistant', response)
+                    return response
 
             
 
@@ -332,6 +337,14 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
                     top_k=3,
                     threshold=0.55  # 55% minimum similarity
                 )
+
+                # Print top 3 results
+                if matches:
+                    print(f"\n📋 TOP 3 SEMANTIC SEARCH RESULTS:")
+                    for i, match in enumerate(matches[:3], 1):
+                        score = match.get('similarity', 0)
+                        print(f"   {i}. Score: {score:.4f} | {match['partnum']} | {match['description']}")
+                    print()
 
                 # If no semantic matches, try fuzzy search
                 if not matches:

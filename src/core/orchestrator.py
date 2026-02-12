@@ -30,8 +30,8 @@ class Orchestrator:
         self.intent_selected = False  # Track if user has selected intent
         self.current_language = 'id'  # Track conversation language (default Indonesian)
 
-        self.awaiting_resume_response = False  # 🆕 Track if waiting for resume answer
-        self.awaiting_order_confirmation = False  # 🆕 Track if waiting for order confirmation
+        self.awaiting_resume_response = False  # Track if waiting for resume answer
+        self.awaiting_order_confirmation = False  # Track if waiting for order confirmation
 
 
         # Warm up cache
@@ -45,7 +45,7 @@ class Orchestrator:
         Returns:
             tuple: (conversation_id, welcome_message)
         """
-        # 🆕 Get conversation with status info
+        # Get conversation with status info
         conversation_id, order_status, last_order_state = \
             self.conversation_manager.get_or_create_conversation(phone_number)
 
@@ -54,7 +54,7 @@ class Orchestrator:
         # Get conversation context
         context = self.conversation_manager.get_context(conversation_id)
 
-        # 🆕 CASE 1: Incomplete order detected - Prompt to resume
+        # CASE 1: Incomplete order detected - Prompt to resume
         if order_status == "in_progress":
             welcome_message = self._generate_resume_prompt(last_order_state)
 
@@ -70,7 +70,7 @@ class Orchestrator:
 
             return conversation_id, welcome_message
 
-        # 🆕 CASE 2: New conversation or completed previous order
+        # CASE 2: New conversation or completed previous order
         if len(context) == 0:
             # Brand new conversation
             welcome_message = "Halo! Saya Chatbot Asisten mu hari ini! Ada yang bisa saya bantu dengan pemesanan produk?"
@@ -324,7 +324,7 @@ Bot: "Terima kasih sudah menghubungi kami! Jangan ragu chat lagi jika ada yang d
         if intent_result.intent == "ORDER" and intent_result.has_entities():
             e = intent_result.entities
 
-            # 🆕 SEMANTIC SEARCH: Match product to database using embeddings
+            # SEMANTIC SEARCH: Match product to database using embeddings
             if e.product_name:
                 # Try semantic search first
                 matches = self.semantic_search.search_part_by_description(
@@ -752,7 +752,7 @@ Type:
         """
         user_input = user_message.lower().strip()
 
-        # 🆕 Option 1: User confirms (Ya/Konfirmasi/OK) - STRICT CHECK
+        # Option 1: User confirms (Ya/Konfirmasi/OK) - STRICT CHECK
         # Must be standalone word, not part of other words like "aja"
         confirmation_words = ['ya', 'konfirmasi', 'yes', 'ok', 'oke', 'benar', 'betul']
         if any(user_input == word or user_input.startswith(word + ' ') or user_input.endswith(' ' + word) for word in confirmation_words):
@@ -954,14 +954,18 @@ Output:
         if len(order_state.order_lines) > 0:
             if changes.get('product_name'):
                 # Need to do semantic search for new product
-                search_result = self.semantic_search_service.search_part_by_description(
-                    changes['product_name']
+                matches = self.semantic_search.search_part_by_description(
+                    query=changes['product_name'],
+                    top_k=3,
+                    threshold=0.55
                 )
-                if search_result and search_result['similarity'] > 0.65:
-                    order_state.order_lines[0].product_name = search_result['description']
-                    order_state.order_lines[0].partnum = search_result['partnum']
+                
+                if matches and len(matches) > 0:
+                    best_match = matches[0]
+                    order_state.order_lines[0].product_name = best_match['description']
+                    order_state.order_lines[0].partnum = best_match['partnum']
                     applied = True
-                    print(f"✏️ Updated product: {search_result['description']}")
+                    print(f"✏️ Updated product: {best_match['description']}")
 
             if changes.get('quantity'):
                 order_state.order_lines[0].quantity = changes['quantity']

@@ -25,7 +25,7 @@ def start_terminal_chat():
     orchestrator = Orchestrator()
 
     # Simulate phone number (in real WhatsApp integration, this comes from webhook)
-    phone_number = "+00000000000"
+    phone_number = "+00000000001"
     conversation_id, welcome_message = orchestrator.start_conversation(phone_number)
     
     print(f"Conversation ID: {conversation_id}")

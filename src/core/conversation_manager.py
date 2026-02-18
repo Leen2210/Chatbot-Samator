@@ -186,34 +186,34 @@ class ConversationManager:
             # Return empty state
             return OrderState()
     
-    def mark_order_complete(self, conversation_id: str):
-        """
-        Mark order as completed (submitted to system)
-        This prevents further modifications
-        """
-        conversation = self.sql_service.db.query(Conversation).filter_by(id=conversation_id).first()
-        if conversation:
-            # Get current state
-            order_dict = conversation.order_state or {}
+    # def mark_order_complete(self, conversation_id: str):
+    #     """
+    #     Mark order as completed (submitted to system)
+    #     This prevents further modifications
+    #     """
+    #     conversation = self.sql_service.db.query(Conversation).filter_by(id=conversation_id).first()
+    #     if conversation:
+    #         # Get current state
+    #         order_dict = conversation.order_state or {}
             
-            # C. Fix the mark_order_completed DB Save:
-            # Ensure the internal dictionary reflects the completed status
-            if order_dict:
-                order_dict["order_status"] = "completed"
-                order_dict["is_complete"] = True
-                conversation.order_state = order_dict
+    #         # C. Fix the mark_order_completed DB Save:
+    #         # Ensure the internal dictionary reflects the completed status
+    #         if order_dict:
+    #             order_dict["order_status"] = "completed"
+    #             order_dict["is_complete"] = True
+    #             conversation.order_state = order_dict
             
-            # Update status columns
-            conversation.order_status = "completed"
-            conversation.status = "completed" 
-            conversation.updated_at = now_wib()
+    #         # Update status columns
+    #         conversation.order_status = "completed"
+    #         conversation.status = "completed" 
+    #         conversation.updated_at = now_wib()
             
-            self.sql_service.db.commit()
+    #         self.sql_service.db.commit()
             
-            # A. Don't Delete the Cache immediately:
-            # Instead of self.cache_service.delete_order_state(conversation_id),
-            # update the cache with the 'completed' state to maintain the lock.
-            self.cache_service.set_order_state(conversation_id, order_dict)
+    #         # A. Don't Delete the Cache immediately:
+    #         # Instead of self.cache_service.delete_order_state(conversation_id),
+    #         # update the cache with the 'completed' state to maintain the lock.
+    #         self.cache_service.set_order_state(conversation_id, order_dict)
 
     def update_order_state(self, conversation_id: str, order_state: OrderState):
         """

@@ -1,15 +1,5 @@
 # order_agent.py
 # src/agents/order_agent.py
-"""
-OrderAgent owns the complete order lifecycle:
-  - Field collection (ask for missing data)
-  - Semantic product search
-  - Date validation
-  - Confirmation prompt & response handling
-  - Cancellation
-  - Saving to DB
-  - Resume flow
-"""
 import json
 from datetime import datetime
 
@@ -17,18 +7,14 @@ import pytz
 
 from src.agents.base_agent import BaseAgent
 from src.models.order_state import OrderState, OrderLine
-from src.models.intent_result import IntentResult
+from src.models.intent_result import ExtractedEntities
 from src.services.llm_service import llm_service
 from src.services.semantic_search_service import semantic_search_service
 from src.core.conversation_manager import conversation_manager
+from src.core.entity_extractor import entity_extractor
 
 
 class OrderAgent(BaseAgent):
-    """
-    Handles ORDER and CANCEL_ORDER intents end-to-end.
-    The Orchestrator calls this agent; the agent returns a string response.
-    All DB writes go through ConversationManager or _save_order_to_database().
-    """
 
     # ------------------------------------------------------------------ #
     #  Entry point                                                         #
@@ -42,23 +28,11 @@ class OrderAgent(BaseAgent):
         context: list,
         **kwargs,
     ) -> str:
-        """
-        Main entry point called by the Orchestrator.
-
-        kwargs expected:
-            intent_result (IntentResult)
-            language (str)               – 'id' or 'en'
-            awaiting_confirmation (bool) – flag from orchestrator state
-        """
-        intent_result: IntentResult | None = kwargs.get("intent_result")
+        intent: str = kwargs.get("intent", "ORDER")
         language: str = kwargs.get("language", "id")
         awaiting_confirmation: bool = kwargs.get("awaiting_confirmation", False)
 
-        # ── 0. Confirmation response (highest priority) ───────────────── #
-        # The Orchestrator only reaches here with awaiting_confirmation=True
-        # when it has already skipped intent classification. "ya", "yes",
-        # "batal", "ubah tanggal" etc. all land here correctly regardless of
-        # what the LLM would have classified them as.
+        # ── 0. Confirmation ───────────────────────────────────────────────
         if awaiting_confirmation:
             response, new_flag = self._handle_confirmation_response(
                 user_message, conversation_id, order_state, language
@@ -66,45 +40,43 @@ class OrderAgent(BaseAgent):
             self._last_confirmation_flag = new_flag
             return response
 
-        # Below this point intent_result is always present (normal ORDER/CANCEL flow)
-
-        # ── 1. Completed order guard ──────────────────────────────────── #
-        if order_state.order_status == "completed" and intent_result.intent == "ORDER":
+        # ── 1. Completed order guard ──────────────────────────────────────
+        if order_state.order_status == "completed" and intent == "ORDER":
             self._last_confirmation_flag = False
             return self._completed_order_response(order_state, user_message, context, language)
 
-        # ── 2. Cancellation ──────────────────────────────────────────── #
-        if intent_result.intent == "CANCEL_ORDER":
-            return self._handle_cancellation(
-                conversation_id, order_state, language
-            )
+        # ── 2. Cancellation ───────────────────────────────────────────────
+        if intent == "CANCEL_ORDER":
+            return self._handle_cancellation(conversation_id, order_state, language)
 
-        # ── (old step 2 removed — confirmation is now step 0 above) ──── #
-        # ── 3. Apply extracted entities to order state ────────────────── #
-        if intent_result.has_entities():
-            date_error = self._apply_entities(
-                intent_result, conversation_id, order_state
-            )
+        # ── 3. Extract entities ───────────────────────────────────────────
+        entities = entity_extractor.extract(
+            user_message=user_message,
+            current_order_state=order_state,
+            history=context[-4:],
+        )
+
+        # ── 4. Apply entities ─────────────────────────────────────────────
+        if entities.has_any():
+            date_error = self._apply_entities(entities, order_state)
             if date_error:
-                return date_error  # Return validation error immediately
+                return date_error
 
-        # ── 4. Auto-fill customer data from previous orders ───────────── #
+        # ── 5. Auto-fill customer ─────────────────────────────────────────
         self._maybe_autofill_customer(conversation_id, order_state)
 
-        # ── 5. Persist updated state ──────────────────────────────────── #
+        # ── 6. Persist ────────────────────────────────────────────────────
         conversation_manager.update_order_state(conversation_id, order_state)
 
-        # ── 6. Check if order is now complete → confirmation prompt ───── #
+        # ── 7. Check complete ─────────────────────────────────────────────
         order_state.update_missing_fields()
         if order_state.is_complete and order_state.order_status == "in_progress":
             self._last_confirmation_flag = True
             return self._generate_confirmation_prompt(order_state, language)
 
-        # ── 7. Ask for next missing field ─────────────────────────────── #
+        # ── 8. Ask missing fields ─────────────────────────────────────────
         self._last_confirmation_flag = False
-        return self._ask_for_missing_fields(
-            user_message, order_state, context, language
-        )
+        return self._ask_for_missing_fields(user_message, order_state, context, language)
 
     # ------------------------------------------------------------------ #
     #  Cancellation                                                        #
@@ -146,53 +118,53 @@ class OrderAgent(BaseAgent):
 
     def _apply_entities(
         self,
-        intent_result: IntentResult,
-        conversation_id: str,
+        entities: ExtractedEntities,
         order_state: OrderState,
     ) -> str | None:
-        """
-        Apply extracted entities to the order state in-place.
-        Returns a validation error string if a date is invalid, else None.
-        """
-        e = intent_result.entities
+        current_line = order_state.order_lines[0] if order_state.order_lines else None
 
-        # Product via semantic search
-        if e.product_name:
-            self._resolve_product(e, order_state)
+        # Product
+        if entities.product_name:
+            existing = current_line.product_name if current_line else None
+            if entities.product_name != existing:
+                self._resolve_product(entities, order_state)
+            else:
+                print(f"⏭️  Skipping semantic search — echo detected")
 
-        # Scalar fields
-        if e.customer_name:
-            order_state.customer_name = e.customer_name
-        if e.customer_company:
-            order_state.customer_company = e.customer_company
-        if e.delivery_date:
-            error = self._validate_delivery_date(e.delivery_date)
+        # Customer
+        if entities.customer_name and entities.customer_name != order_state.customer_name:
+            order_state.customer_name = entities.customer_name
+
+        if entities.customer_company and entities.customer_company != order_state.customer_company:
+            order_state.customer_company = entities.customer_company
+
+        # Date
+        if entities.delivery_date and entities.delivery_date != order_state.delivery_date:
+            error = self._validate_delivery_date(entities.delivery_date)
             if error:
                 return error
-            order_state.delivery_date = e.delivery_date
+            order_state.delivery_date = entities.delivery_date
 
-        # Quantity/unit without product
-        if not e.product_name and order_state.order_lines:
+        # Quantity/unit (no product mention)
+        if not entities.product_name and order_state.order_lines:
             line = order_state.order_lines[0]
-            if e.quantity:
-                line.quantity = e.quantity
-            if e.unit:
-                line.unit = e.unit
+            if entities.quantity and entities.quantity != line.quantity:
+                line.quantity = entities.quantity
+            if entities.unit and entities.unit != line.unit:
+                line.unit = entities.unit
 
         return None
 
-    def _resolve_product(self, entities, order_state: OrderState):
-        """Run semantic search and update the first order line."""
+    def _resolve_product(self, entities: ExtractedEntities, order_state: OrderState):
         matches = semantic_search_service.search_part_by_description(
             query=entities.product_name, top_k=3, threshold=0.55
         )
-
         if not matches:
             matches = semantic_search_service.fuzzy_search_by_description(
                 query=entities.product_name, top_k=3
             )
 
-        if len(order_state.order_lines) == 0:
+        if not order_state.order_lines:
             order_state.order_lines.append(OrderLine())
 
         line = order_state.order_lines[0]
@@ -211,12 +183,12 @@ class OrderAgent(BaseAgent):
             line.quantity = entities.quantity
 
     # ------------------------------------------------------------------ #
-    #  Auto-fill customer from previous orders                             #
+    #  Auto-fill customer                                                  #
     # ------------------------------------------------------------------ #
 
     def _maybe_autofill_customer(self, conversation_id: str, order_state: OrderState):
         if order_state.customer_name and order_state.customer_company:
-            return  # Already have customer data
+            return
         if order_state.order_status not in ("new", "in_progress"):
             return
 
@@ -233,17 +205,12 @@ class OrderAgent(BaseAgent):
             print("✅ Auto-filled customer_company from previous order")
 
     # ------------------------------------------------------------------ #
-    #  Completed order response (LLM)                                      #
+    #  Completed order response                                            #
     # ------------------------------------------------------------------ #
 
     def _completed_order_response(
         self, order_state: OrderState, user_message: str, context: list, language: str
     ) -> str:
-        """
-        Called when the user sends an ORDER message but the order is already confirmed.
-        Tells them it's locked, offers to start a new one.
-        Belongs here in OrderAgent — it's an order-domain concern.
-        """
         order_json = json.dumps(order_state.to_dict(), indent=2, ensure_ascii=False)
 
         if language == "en":
@@ -280,7 +247,7 @@ Maksimal 2-3 kalimat per respons."""
         )
 
     # ------------------------------------------------------------------ #
-    #  Ask for missing fields (LLM)                                        #
+    #  Ask for missing fields                                              #
     # ------------------------------------------------------------------ #
 
     def _ask_for_missing_fields(
@@ -310,7 +277,6 @@ CURRENT ORDER STATE:
 RULES:
 - Answer any customer question first, then continue
 - Ask for one missing field at a time
-- If all fields are complete, show confirmation summary
 - Maximum 2-3 sentences per response"""
         else:
             system_prompt = f"""Anda adalah customer service call center profesional di Indonesia yang membantu pelanggan memesan produk industrial.
@@ -330,7 +296,6 @@ INFORMASI PESANAN SAAT INI:
 ATURAN:
 - Jawab pertanyaan customer dulu sebelum melanjutkan
 - Tanyakan satu informasi yang kosong per respons
-- Jika semua lengkap, tampilkan konfirmasi
 - Maksimal 2-3 kalimat per respons"""
 
         return llm_service.chat(
@@ -392,31 +357,16 @@ Ketik:
     #  Confirmation response handling                                      #
     # ------------------------------------------------------------------ #
 
-    def _handle_confirmation_response(
-        self,
-        user_message: str,
-        conversation_id: str,
-        order_state: OrderState,
-        language: str,
-    ) -> tuple[str, bool]:
-        """
-        Returns (response_string, new_awaiting_confirmation_flag).
-        """
+    def _handle_confirmation_response(self, user_message, conversation_id, order_state, language):
         user_input = user_message.lower().strip()
 
-        # ── Confirm ─────────────────────────────────────────────────────
-        confirm_words = ["ya", "konfirmasi", "yes", "ok", "oke", "benar", "betul"]
-        is_confirm = any(
-            user_input == w
-            or user_input.startswith(w + " ")
-            or user_input.endswith(" " + w)
-            for w in confirm_words
-        )
-        if is_confirm:
-            response = self._complete_order(conversation_id, order_state, language)
-            return response, False  # confirmation done
+        # ── Edit DULU sebelum confirm ────────────────────────────────────
+        # Harus di atas confirm check karena "ubah ... ya" mengandung confirm word
+        edit_words = ["ubah", "edit", "ganti", "salah", "change", "modify"]
+        if any(w in user_input for w in edit_words):
+            return self._handle_edit_request(user_message, conversation_id, order_state, language)
 
-        # ── Cancel ──────────────────────────────────────────────────────
+        # ── Cancel ───────────────────────────────────────────────────────
         cancel_words = ["batal", "cancel", "stop", "gak jadi", "tidak jadi"]
         if any(w in user_input for w in cancel_words):
             conversation_manager.reset_order_state(conversation_id)
@@ -427,31 +377,33 @@ Ketik:
             )
             return msg, False
 
-        # ── Edit ────────────────────────────────────────────────────────
-        edit_words = ["ubah", "edit", "ganti", "salah", "change", "modify"]
-        if any(w in user_input for w in edit_words):
-            return self._handle_edit_request(
-                user_message, conversation_id, order_state, language
-            )
+        # ── Confirm ──────────────────────────────────────────────────────
+        confirm_words = ["ya", "konfirmasi", "yes", "ok", "oke", "benar", "betul"]
+        is_confirm = any(
+            user_input == w
+            or user_input.startswith(w + " ")
+            or user_input.endswith(" " + w)
+            for w in confirm_words
+        )
+        if is_confirm:
+            return self._complete_order(conversation_id, order_state, language), False
 
         # ── Unclear ──────────────────────────────────────────────────────
-        if language == "en":
-            msg = (
-                "Sorry, I didn't quite understand.\n\n"
-                "Is the order correct?\n"
-                '- Type "Yes" to confirm\n'
-                '- Type "Change [field] to [value]" to modify\n'
-                '- Type "Cancel" to cancel'
-            )
-        else:
-            msg = (
-                "Maaf, saya kurang mengerti.\n\n"
-                "Apakah data pesanan sudah benar?\n"
-                '- Ketik "Ya" untuk konfirmasi\n'
-                '- Ketik "Ubah [field] jadi [value]" untuk mengubah\n'
-                '- Ketik "Batal" untuk membatalkan'
-            )
-        return msg, True  # still awaiting
+        msg = (
+            "Sorry, I didn't quite understand.\n\n"
+            "Is the order correct?\n"
+            '- Type "Yes" to confirm\n'
+            '- Type "Change [field] to [value]" to modify\n'
+            '- Type "Cancel" to cancel'
+            if language == "en"
+            else
+            "Maaf, saya kurang mengerti.\n\n"
+            "Apakah data pesanan sudah benar?\n"
+            '- Ketik "Ya" untuk konfirmasi\n'
+            '- Ketik "Ubah [field] jadi [value]" untuk mengubah\n'
+            '- Ketik "Batal" untuk membatalkan'
+        )
+        return msg, True
 
     def _handle_edit_request(
         self,
@@ -460,10 +412,15 @@ Ketik:
         order_state: OrderState,
         language: str,
     ) -> tuple[str, bool]:
-        """Use LLM to extract the desired changes and apply them."""
-        changes_result = self._extract_order_changes(user_message, order_state)
+        """Use entity_extractor with edit_mode=True to extract changes."""
+        entities = entity_extractor.extract(
+            user_message=user_message,
+            current_order_state=order_state,
+            history=[],
+            edit_mode=True,
+        )
 
-        if not changes_result.get("has_changes"):
+        if not entities.has_any():
             msg = (
                 "Alright, which field would you like to change? "
                 "(e.g., 'change date to tomorrow', 'change company to CV ABC')"
@@ -473,7 +430,9 @@ Ketik:
             )
             return msg, True
 
-        result = self._apply_order_changes(order_state, changes_result["changes"])
+        changes = entities.model_dump(exclude_none=True)
+        result = self._apply_order_changes(order_state, changes)
+
         if isinstance(result, dict) and "error" in result:
             return result["error"], True
 
@@ -488,58 +447,6 @@ Ketik:
             else "Maaf, saya tidak bisa memahami perubahan yang Anda inginkan. Bisa dijelaskan lebih detail?"
         )
         return msg, True
-
-    def _extract_order_changes(self, user_message: str, order_state: OrderState) -> dict:
-        now = datetime.now()
-        current_date = now.strftime("%Y-%m-%d")
-        day_map = {
-            "Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu",
-            "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu",
-        }
-        current_day_id = day_map.get(now.strftime("%A"), now.strftime("%A"))
-
-        system_prompt = f"""Anda adalah sistem ekstraksi perubahan pesanan.
-
-CURRENT_DATE: {current_date} ({current_day_id})
-
-CURRENT ORDER STATE:
-{json.dumps(order_state.to_dict(), indent=2, ensure_ascii=False)}
-
-USER MESSAGE: "{user_message}"
-
-OUTPUT FORMAT (JSON only, no markdown):
-{{
-  "has_changes": true/false,
-  "changes": {{
-    "customer_name": "nilai baru atau null",
-    "customer_company": "nilai baru atau null",
-    "delivery_date": "YYYY-MM-DD atau null",
-    "product_name": "nilai baru atau null",
-    "quantity": angka_atau_null,
-    "unit": "nilai baru atau null"
-  }}
-}}
-
-RULES:
-- "besok" = {current_date} + 1 day
-- "lusa" = {current_date} + 2 days
-- Only set fields that ARE changing; leave others null
-- has_changes: false if no clear change detected"""
-
-        try:
-            response = llm_service.chat(
-                user_message=user_message,
-                system_prompt=system_prompt,
-                conversation_history=[],
-            )
-            import re
-            cleaned = re.sub(r"^```json\s*", "", response.strip())
-            cleaned = re.sub(r"^```\s*", "", cleaned)
-            cleaned = re.sub(r"\s*```$", "", cleaned)
-            return json.loads(cleaned)
-        except Exception as e:
-            print(f"⚠️ Error extracting changes: {e}")
-            return {"has_changes": False, "changes": {}}
 
     def _apply_order_changes(self, order_state: OrderState, changes: dict):
         """Apply changes dict to order_state in-place. Returns True if applied, error dict if invalid."""
@@ -679,7 +586,7 @@ Ada yang bisa saya bantu lagi?"""
             svc.close()
 
     # ------------------------------------------------------------------ #
-    #  Resume flow (called by Orchestrator)                                #
+    #  Resume flow                                                         #
     # ------------------------------------------------------------------ #
 
     def generate_resume_prompt(self, last_order_state: dict) -> str:
@@ -739,11 +646,10 @@ Ada yang bisa saya bantu lagi?"""
         )
 
     # ------------------------------------------------------------------ #
-    #  Date validation (pure business rule, no LLM)                       #
+    #  Date validation                                                     #
     # ------------------------------------------------------------------ #
 
     def _validate_delivery_date(self, delivery_date: str) -> str | None:
-        """Return error string if date is invalid, else None."""
         wib = pytz.timezone("Asia/Jakarta")
         today = datetime.now(wib).date()
 
@@ -769,7 +675,7 @@ Ada yang bisa saya bantu lagi?"""
                 "Untuk tanggal berapa ya pengirimannya?"
             )
 
-        if delivery_dt.weekday() == 6:  # Sunday
+        if delivery_dt.weekday() == 6:
             month_map = {
                 "January": "Januari", "February": "Februari", "March": "Maret",
                 "April": "April", "May": "Mei", "June": "Juni", "July": "Juli",

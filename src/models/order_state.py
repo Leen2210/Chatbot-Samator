@@ -62,8 +62,10 @@ class OrderState(BaseModel):
             self.is_complete = True
             if self.order_status == "new" or self.order_status == "in_progress":
                 self.order_status = "in_progress"  # Ready for confirmation
-        elif len(self.order_lines) > 0 or self.customer_name or self.customer_company:
-            # Has some data → in_progress
+        elif any(
+            line.product_name or line.quantity or line.unit
+            for line in self.order_lines
+        ) or self.customer_name or self.customer_company:            # Has some data → in_progress
             if self.order_status == "new":
                 self.order_status = "in_progress"
         else:

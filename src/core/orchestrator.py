@@ -36,6 +36,8 @@ class Orchestrator:
         self.current_language: str = "id"
         self.awaiting_resume_response: bool = False
         self.awaiting_order_confirmation: bool = False
+        self.is_escalated: bool = False  # ← tambah ini
+
 
         self._warm_up_cache()
 
@@ -112,25 +114,41 @@ class Orchestrator:
         # We intentionally skip intent classification here because "ya" in
         # isolation looks like a courtesy word, not a confirmation. The flag
         # gives us context the classifier does not have.
+        # ── PRIORITY 2: Confirmation — SEBELUM intent classification ─────
+    # CANCEL_ORDER, "ya", "ubah" semua harus lewat sini kalau flag True
         if self.awaiting_order_confirmation:
-            conversation_manager.add_message(
-                self.current_conversation_id, "user", user_message
-            )
+            conversation_manager.add_message(self.current_conversation_id, "user", user_message)
             response = order_agent.handle(
                 user_message,
                 self.current_conversation_id,
                 order_state,
                 context,
-                intent_result=None,          # not needed — agent checks flag
+                intent=None,
                 language=self.current_language,
                 awaiting_confirmation=True,
             )
             self.awaiting_order_confirmation = getattr(
                 order_agent, "_last_confirmation_flag", False
             )
-            conversation_manager.add_message(
-                self.current_conversation_id, "assistant", response
-            )
+            conversation_manager.add_message(self.current_conversation_id, "assistant", response)
+            return response
+
+        # ── PRIORITY 3: Escalation mode ──────────────────────────────── #
+        # Jika sudah di-handoff ke CS, semua pesan ditangani oleh EscalationAgent
+        # kecuali user mengetik "balik ke bot"
+        if self.is_escalated:
+            if "balik ke bot" in user_message.lower():
+                self.is_escalated = False
+                response = (
+                    "Halo! Saya siap membantu Anda kembali. Ada yang bisa saya bantu?"
+                    if self.current_language == "id"
+                    else "Welcome back! How can I help you?"
+                )
+            else:
+                response = escalation_agent.handle_handoff_message()
+
+            conversation_manager.add_message(self.current_conversation_id, "user", user_message)
+            conversation_manager.add_message(self.current_conversation_id, "assistant", response)
             return response
 
         # ── ALWAYS: Classify intent ──────────────────────────────────── #
@@ -138,21 +156,19 @@ class Orchestrator:
         #   - Mid-order price question → FALLBACK → EscalationAgent
         #   - Mid-order "batal"        → CANCEL_ORDER → OrderAgent
         # OrderState in DB is untouched during FALLBACK, so ordering resumes cleanly.
-        intent_result = intent_classifier.classify_and_extract(
-            user_message, order_state, history=context[-4:]
+        intent_result = intent_classifier.classify(
+            user_message, history=context[-4:]
         )
-        print(f"[Orchestrator] Intent: {intent_result.intent}")
+        print(f"[Orchestrator] Intent: {intent_result}")
 
         # Store user message with extracted entities
         conversation_manager.add_message(
             self.current_conversation_id,
             "user",
-            user_message,
-            entities=intent_result.entities.model_dump(),
-        )
+            user_message)
 
         # ── Routing table ────────────────────────────────────────────── #
-        if intent_result.intent == "CHIT_CHAT":
+        if intent_result == "CHIT_CHAT":
             response = chit_chat_agent.handle(
                 user_message,
                 self.current_conversation_id,
@@ -161,7 +177,7 @@ class Orchestrator:
                 language=self.current_language,
             )
 
-        elif intent_result.intent in ("ORDER", "CANCEL_ORDER"):
+        elif intent_result in ("ORDER", "CANCEL_ORDER"):
             response = order_agent.handle(
                 user_message,
                 self.current_conversation_id,
@@ -185,6 +201,8 @@ class Orchestrator:
                 context,
                 language=self.current_language,
             )
+            # Set flag escalation agar pesan berikutnya tidak di-route ke agent lain
+            self.is_escalated = True
 
         conversation_manager.add_message(
             self.current_conversation_id, "assistant", response

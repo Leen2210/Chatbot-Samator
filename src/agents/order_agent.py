@@ -10,6 +10,7 @@ from src.models.order_state import OrderState, OrderLine
 from src.models.intent_result import ExtractedEntities
 from src.services.llm_service import llm_service
 from src.services.semantic_search_service import semantic_search_service
+from src.services.date_calculator_service import date_calculator_service
 from src.core.conversation_manager import conversation_manager
 from src.core.entity_extractor import entity_extractor
 
@@ -138,12 +139,15 @@ class OrderAgent(BaseAgent):
         if entities.customer_company and entities.customer_company != order_state.customer_company:
             order_state.customer_company = entities.customer_company
 
-        # Date
-        if entities.delivery_date and entities.delivery_date != order_state.delivery_date:
-            error = self._validate_delivery_date(entities.delivery_date)
-            if error:
-                return error
-            order_state.delivery_date = entities.delivery_date
+        # Date - calculate from delivery_date_raw
+        if entities.delivery_date_raw:
+            calculated_date = date_calculator_service.calculate_date(entities.delivery_date_raw)
+            if calculated_date:
+                error = self._validate_delivery_date(calculated_date)
+                if error:
+                    return error
+                order_state.delivery_date = calculated_date
+                order_state.delivery_date_raw = entities.delivery_date_raw
 
         # Quantity/unit (no product mention)
         if not entities.product_name and order_state.order_lines:
@@ -269,7 +273,8 @@ SPEAKING STYLE:
 
 YOUR TASK:
 - Ask for missing order information naturally
-- Ensure you collect: product, quantity, unit, delivery date, customer name, company/organization
+- ONLY collect these fields: product, quantity, unit, delivery date, customer name, company/organization
+- DO NOT ask for email, phone number, or any other information
 
 CURRENT ORDER STATE:
 {order_json}
@@ -277,7 +282,8 @@ CURRENT ORDER STATE:
 RULES:
 - Answer any customer question first, then continue
 - Ask for one missing field at a time
-- Maximum 2-3 sentences per response"""
+- Maximum 2-3 sentences per response
+- NEVER mention or ask for contact information (email/phone)"""
         else:
             system_prompt = f"""Anda adalah customer service call center profesional di Indonesia yang membantu pelanggan memesan produk industrial.
 
@@ -288,7 +294,8 @@ GAYA BICARA:
 
 TUGAS:
 - Tanyakan informasi pesanan yang masih kurang secara natural
-- Pastikan mendapatkan: produk, jumlah, satuan, tanggal kirim, nama customer, nama perusahaan/organisasi
+- HANYA kumpulkan field ini: produk, jumlah, satuan, tanggal kirim, nama customer, nama perusahaan/organisasi
+- JANGAN tanya email, nomor telepon, atau informasi lain
 
 INFORMASI PESANAN SAAT INI:
 {order_json}
@@ -296,7 +303,8 @@ INFORMASI PESANAN SAAT INI:
 ATURAN:
 - Jawab pertanyaan customer dulu sebelum melanjutkan
 - Tanyakan satu informasi yang kosong per respons
-- Maksimal 2-3 kalimat per respons"""
+- Maksimal 2-3 kalimat per respons
+- JANGAN PERNAH menyebut atau menanyakan informasi kontak (email/telepon)"""
 
         return llm_service.chat(
             user_message=user_message,
@@ -315,6 +323,12 @@ ATURAN:
             if line.partnum
             else line.product_name
         )
+        
+        # Handle liquid products - quantity is optional
+        if line.is_liquid():
+            quantity_display = f"{line.quantity} {line.unit}" if line.quantity else line.unit or "-"
+        else:
+            quantity_display = f"{line.quantity} {line.unit}"
 
         if language == "en":
             return f"""Alright, let me confirm your order:
@@ -322,7 +336,7 @@ ATURAN:
 📦 ORDER DETAILS:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Product     : {product_info}
-Quantity    : {line.quantity} {line.unit}
+Quantity    : {quantity_display}
 Name        : {order_state.customer_name}
 Company     : {order_state.customer_company}
 Date        : {order_state.delivery_date}
@@ -340,7 +354,7 @@ Type:
 📦 DETAIL PESANAN:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Produk      : {product_info}
-Jumlah      : {line.quantity} {line.unit}
+Jumlah      : {quantity_display}
 Nama        : {order_state.customer_name}
 Perusahaan  : {order_state.customer_company}
 Tanggal     : {order_state.delivery_date}
@@ -460,12 +474,15 @@ Ketik:
             order_state.customer_company = changes["customer_company"]
             applied = True
 
-        if changes.get("delivery_date"):
-            error = self._validate_delivery_date(changes["delivery_date"])
-            if error:
-                return {"error": error}
-            order_state.delivery_date = changes["delivery_date"]
-            applied = True
+        if changes.get("delivery_date_raw"):
+            calculated_date = date_calculator_service.calculate_date(changes["delivery_date_raw"])
+            if calculated_date:
+                error = self._validate_delivery_date(calculated_date)
+                if error:
+                    return {"error": error}
+                order_state.delivery_date = calculated_date
+                order_state.delivery_date_raw = changes["delivery_date_raw"]
+                applied = True
 
         if order_state.order_lines:
             if changes.get("product_name"):
@@ -500,6 +517,12 @@ Ketik:
         conversation_manager.reset_order_state(conversation_id)
 
         line = order_state.order_lines[0]
+        
+        # Handle liquid products - quantity is optional
+        if line.is_liquid():
+            quantity_display = f"{line.quantity} {line.unit}" if line.quantity else line.unit or "-"
+        else:
+            quantity_display = f"{line.quantity} {line.unit}"
 
         if language == "en":
             return f"""✅ ORDER SUCCESSFULLY CONFIRMED!
@@ -508,7 +531,7 @@ Ketik:
 Order Number: {order_id}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Product     : {line.product_name}
-Quantity    : {line.quantity} {line.unit}
+Quantity    : {quantity_display}
 Date        : {order_state.delivery_date}
 Customer    : {order_state.customer_name}
 Company     : {order_state.customer_company}
@@ -525,7 +548,7 @@ Is there anything else I can help you with?"""
 Nomor Pesanan: {order_id}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Produk      : {line.product_name}
-Jumlah      : {line.quantity} {line.unit}
+Jumlah      : {quantity_display}
 Tanggal     : {order_state.delivery_date}
 Customer    : {order_state.customer_name}
 Perusahaan  : {order_state.customer_company}

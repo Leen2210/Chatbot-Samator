@@ -1,7 +1,7 @@
 # order_state.py
 # src/models/order_state.py
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import date
 
 class OrderLine(BaseModel):
@@ -10,6 +10,13 @@ class OrderLine(BaseModel):
     product_name: Optional[str] = None
     quantity: Optional[int] = None
     unit: Optional[str] = None  # btl, tabung, m3, etc.
+    
+    def is_liquid(self) -> bool:
+        """Check if product is liquid (doesn't require quantity)"""
+        if not self.product_name:
+            return False
+        name_lower = self.product_name.lower()
+        return "liquid" in name_lower or "cair" in name_lower
 
 class OrderState(BaseModel):
     """
@@ -20,6 +27,7 @@ class OrderState(BaseModel):
     customer_name: Optional[str] = None
     customer_company: Optional[str] = None
     delivery_date: Optional[str] = None  # ISO format: YYYY-MM-DD
+    delivery_date_raw: Optional[Dict] = None  # Temporal JSON schema
     order_lines: List[OrderLine] = Field(default_factory=lambda: [OrderLine()])
     is_complete: bool = False
     missing_fields: List[str] = Field(default_factory=list)
@@ -53,7 +61,8 @@ class OrderState(BaseModel):
         for idx, line in enumerate(self.order_lines):
             if not line.product_name:
                 missing.append(f"order_lines[{idx}].product_name")
-            if not line.quantity:
+            # Skip quantity validation for liquid products
+            if not line.is_liquid() and not line.quantity:
                 missing.append(f"order_lines[{idx}].quantity")
             if not line.unit:
                 missing.append(f"order_lines[{idx}].unit")

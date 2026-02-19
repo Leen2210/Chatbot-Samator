@@ -9,7 +9,8 @@ class ExtractedEntities(BaseModel):
     unit: Optional[str] = None
     customer_name: Optional[str] = None
     customer_company: Optional[str] = None
-    delivery_date: Optional[str] = None  # Will be normalized later
+    delivery_date: Optional[str] = None  # Calculated YYYY-MM-DD
+    delivery_date_raw: Optional[Dict] = None  # Temporal JSON schema
     cancellation_reason: Optional[str] = None  # For CANCEL_ORDER intent
 
     def has_any(self) -> bool:

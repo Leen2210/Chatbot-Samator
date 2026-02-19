@@ -13,8 +13,10 @@ TUGAS: Klasifikasi intent dari pesan user. Return JSON only.
 - ORDER: Memesan produk, menyebut nama produk, quantity, atau informasi pesanan
   * "mau pesan oksigen", "butuh 5 tabung", "liquid n2 bisa?", "ada nitrogen?"
   * Jika pesan mengandung nama produk industrial + kata tanya (bisa/ada/tersedia) → ORDER
+  * Jika user menjawab pertanyaan bot tentang pesanan (nama, perusahaan, tanggal, jumlah) → ORDER
+  * "saya Jessica", "PT ABC", "besok", "10 tabung" → ORDER (jawaban untuk melengkapi pesanan)
 - CANCEL_ORDER: Membatalkan pesanan aktif ("batal", "cancel", "gak jadi", "stop")
-- CHIT_CHAT: Greeting, courtesy, acknowledgment
+- CHIT_CHAT: Greeting, courtesy, acknowledgment TANPA konteks pesanan
   * "terima kasih", "halo", "oke", "tidak ada lagi", "sudah cukup", "baik pak"
   * Jika user bilang "tidak ada" setelah ditanya "ada yang bisa dibantu?" → CHIT_CHAT
 - FALLBACK: Pertanyaan non-order yang perlu call center
@@ -38,7 +40,7 @@ def build_intent_user_prompt(user_message: str, history: list = None) -> str:
 USER MESSAGE:
 "{user_message}"
 
-Klasifikasi intent."""
+Klasifikasi intent. Jika bot sedang menanyakan informasi pesanan dan user menjawab, maka intent = ORDER."""
 
 
 # ─────────────────────────────────────────────
@@ -55,7 +57,8 @@ TUGAS: Ekstrak entities dari pesan user TERBARU saja.
 - unit: Satuan quantity
 - customer_name: Nama individu (Jessica, Budi Santoso)
 - customer_company: Nama organisasi (PT/CV/RS/Yayasan/Toko/UD/dll)
-- delivery_date: Format YYYY-MM-DD (konversi "besok"=+1 hari, "lusa"=+2 hari dari CURRENT_DATE)
+- delivery_date: JANGAN PERNAH ISI FIELD INI. Biarkan null. Sistem akan hitung otomatis dari delivery_date_raw.
+- delivery_date_raw: Temporal JSON schema untuk tanggal kirim (lihat ATURAN TANGGAL)
 - cancellation_reason: Alasan cancel (hanya untuk CANCEL_ORDER)
 
 === ATURAN PALING PENTING ===
@@ -67,9 +70,24 @@ TUGAS: Ekstrak entities dari pesan user TERBARU saja.
 
 === MODE EDIT (saat user mengubah pesanan yang sudah lengkap) ===
 Jika EDIT_MODE: true, user sedang mengubah field pesanan yang sudah ada.
-- "ubah tanggal jadi besok" → delivery_date = besok, sisanya null
+- "ubah tanggal jadi besok" → delivery_date_raw = {"day_offset": 1}, sisanya null
 - "ganti perusahaan jadi CV ABC" → customer_company = "CV ABC", sisanya null
 - "ubah jumlah jadi 10" → quantity = 10, sisanya null
+
+=== ATURAN TANGGAL (WAJIB IKUTI) ===
+**JANGAN PERNAH menghitung atau mengisi delivery_date. Biarkan null.**
+**HANYA isi delivery_date_raw dengan temporal JSON schema.**
+
+Contoh temporal JSON:
+- "besok" → {"day_offset": 1}
+- "lusa" → {"day_offset": 2}
+- "3 hari lagi" → {"day_offset": 3}
+- "senin" → {"target_weekday": "senin", "extra_weeks": 0}
+- "selasa minggu depan" → {"target_weekday": "selasa", "extra_weeks": 1}
+- "jumat 2 minggu lagi" → {"target_weekday": "jumat", "extra_weeks": 2}
+- "tanggal 15" → {"target_date": 15, "extra_months": 0}
+- "15 januari" → {"target_date": 15, "extra_months": 1} (jika sekarang Desember)
+- "2025-03-20" → {"day_offset": X} (hitung selisih hari dari CURRENT_DATE)
 
 === ATURAN EKSTRAKSI ===
 
@@ -81,7 +99,12 @@ Jika EDIT_MODE: true, user sedang mengubah field pesanan yang sudah ada.
 "liquid oxygen 10000 m3" → product_name="liquid oxygen", quantity=10000, unit="m3"
 "nitrogen cair 5000 liter" → product_name="nitrogen cair", quantity=5000, unit="liter"
 
-**3. PARTS/PRODUK LAIN**
+**3. MULTIPLE PRODUCTS**
+Jika user menyebut lebih dari 1 produk ("liquid oxygen dan tabung nitrogen"):
+→ Ekstrak HANYA produk PERTAMA yang disebutkan
+→ Abaikan produk kedua dan seterusnya
+
+**4. PARTS/PRODUK LAIN**
 Ikuti pola normal (regulator, valve, hose)
 
 === FORMAT OUTPUT ===
@@ -93,6 +116,7 @@ JSON only, tanpa markdown:
   "customer_name": null,
   "customer_company": null,
   "delivery_date": null,
+  "delivery_date_raw": null,
   "cancellation_reason": null
 }"""
 

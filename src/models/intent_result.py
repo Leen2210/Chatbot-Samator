@@ -1,55 +1,78 @@
 # src/models/intent_result.py
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+from typing import Optional, List
 
-class ExtractedEntities(BaseModel):
-    """Entities extracted from user message"""
+
+class ExtractedOrderLine(BaseModel):
+    """Entities extracted for a single order line."""
+    line_index: Optional[int] = None      # which existing line to update (0-based); None = new line
     product_name: Optional[str] = None
     quantity: Optional[int] = None
     unit: Optional[str] = None
-    customer_name: Optional[str] = None
-    customer_company: Optional[str] = None
-    delivery_date: Optional[str] = None  # Calculated YYYY-MM-DD
-    delivery_date_raw: Optional[Dict] = None  # Temporal JSON schema
-    cancellation_reason: Optional[str] = None  # For CANCEL_ORDER intent
+    delivery_date: Optional[str] = None   # per-line delivery date (YYYY-MM-DD)
 
     def has_any(self) -> bool:
-        """Check if any entity was extracted."""
-        return any(v is not None for v in self.model_dump().values())
+        return any(v is not None for v in [
+            self.product_name, self.quantity, self.unit, self.delivery_date
+        ])
+
+
+class ExtractedEntities(BaseModel):
+    """
+    Result of entity extraction from user message.
+    Top-level fields are order-level; order_lines holds per-item data.
+    """
+    customer_name: Optional[str] = None
+    customer_company: Optional[str] = None
+    cancellation_reason: Optional[str] = None
+    order_lines: List[ExtractedOrderLine] = Field(default_factory=list)
+
+    def has_any(self) -> bool:
+        top_level = any(v is not None for v in [
+            self.customer_name, self.customer_company, self.cancellation_reason
+        ])
+        lines = any(line.has_any() for line in self.order_lines)
+        return top_level or lines
+
+    def has_new_entities(self, order_state) -> bool:
+        """Check if extracted entities differ from current order state."""
+        if self.customer_name and self.customer_name != order_state.customer_name:
+            return True
+        if self.customer_company and self.customer_company != order_state.customer_company:
+            return True
+        if self.cancellation_reason:
+            return True
+
+        for extracted_line in self.order_lines:
+            idx = extracted_line.line_index
+            if idx is not None and idx < len(order_state.order_lines):
+                current = order_state.order_lines[idx]
+            elif order_state.order_lines:
+                current = order_state.order_lines[0]
+            else:
+                return True  # new line being added
+
+            if extracted_line.product_name and extracted_line.product_name != current.product_name:
+                return True
+            if extracted_line.quantity and extracted_line.quantity != current.quantity:
+                return True
+            if extracted_line.unit and extracted_line.unit != current.unit:
+                return True
+            if extracted_line.delivery_date and extracted_line.delivery_date != current.delivery_date:
+                return True
+
+        return False
+
 
 class IntentResult(BaseModel):
     """Result from intent classification + entity extraction"""
-    intent: str = "UNKNOWN"  # ORDER, CANCEL_ORDER, FALLBACK, UNKNOWN
+    intent: str = "UNKNOWN"
     entities: ExtractedEntities = Field(default_factory=ExtractedEntities)
-    confidence: float = 1.0  # 0.0 to 1.0
-    raw_response: Optional[str] = None  # For debugging
-    
+    confidence: float = 1.0
+    raw_response: Optional[str] = None
+
     def has_entities(self) -> bool:
-        """Check if any entities were extracted"""
-        entities_dict = self.entities.model_dump(exclude_none=True)
-        return len(entities_dict) > 0
-    
+        return self.entities.has_any()
+
     def has_new_entities(self, order_state) -> bool:
-        """
-        Check if entities contain values that are NEW compared to current order state.
-        Prevents acting on LLM echo of existing state.
-        """
-        e = self.entities
-        current_line = order_state.order_lines[0] if order_state.order_lines else None
-
-        if e.product_name and e.product_name != (current_line.product_name if current_line else None):
-            return True
-        if e.quantity and e.quantity != (current_line.quantity if current_line else None):
-            return True
-        if e.unit and e.unit != (current_line.unit if current_line else None):
-            return True
-        if e.customer_name and e.customer_name != order_state.customer_name:
-            return True
-        if e.customer_company and e.customer_company != order_state.customer_company:
-            return True
-        if e.delivery_date and e.delivery_date != order_state.delivery_date:
-            return True
-        if e.cancellation_reason:
-            return True
-
-        return False
+        return self.entities.has_new_entities(order_state)
